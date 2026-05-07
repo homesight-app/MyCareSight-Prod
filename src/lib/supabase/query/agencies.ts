@@ -1,7 +1,7 @@
 import type { Supabase } from '../types'
 
 export async function getAgencyById(supabase: Supabase, agencyId: string) {
-  return supabase.from('agencies').select('agency_admin_ids').eq('id', agencyId).single()
+  return supabase.from('agencies').select('*').eq('id', agencyId).single()
 }
 
 export async function insertAgency(supabase: Supabase, payload: Record<string, unknown>) {
@@ -80,6 +80,11 @@ export async function getAgencyNameById(supabase: Supabase, agencyId: string) {
   return supabase.from('agencies').select('name').eq('id', agencyId).single()
 }
 
+export async function getAgenciesByIds(supabase: Supabase, ids: string[]) {
+  if (ids.length === 0) return { data: [] as { id: string; name: string }[], error: null }
+  return supabase.from('agencies').select('id, name').in('id', ids)
+}
+
 /** Full agency admin row by id. */
 export async function getClientById(supabase: Supabase, adminId: string) {
   return supabase.from('agency_admins').select('*').eq('id', adminId).single()
@@ -128,6 +133,16 @@ export async function getClientsWithCompanyOwner(supabase: Supabase) {
   return supabase
     .from('agency_admins')
     .select('id, contact_name, contact_email')
+    .not('user_id', 'is', null)
+    .order('contact_name', { ascending: true })
+}
+
+/** Agency admins not currently assigned to any agency — used for "add admin" dropdowns. */
+export async function getUnassignedAgencyAdmins(supabase: Supabase) {
+  return supabase
+    .from('agency_admins')
+    .select('id, contact_name, contact_email')
+    .is('agency_id', null)
     .not('user_id', 'is', null)
     .order('contact_name', { ascending: true })
 }

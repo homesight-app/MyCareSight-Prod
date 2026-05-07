@@ -1,6 +1,6 @@
 /**
  * Persists coordinator Time & Billing decisions to visit_approvals, visit_financials,
- * and visit_adjustment_history (audit trail).
+ * and visit_adjustment_history (audit trail). Reports should read frozen rows from visit_financials.
  */
 
 import type { Supabase } from '@/lib/supabase/types'
@@ -131,9 +131,11 @@ export async function syncVisitApprovalAndFinancialsOnApprove(params: {
   )
   const resolvedPayRate = Number(pay?.rate ?? 0)
   const payUnit = (pay?.unit_type as string | null) ?? 'hour'
+  const resolvedPayAmount = round2(calcAmount(approvedActualHours, resolvedPayRate, payUnit))
 
   const resolvedBillRate = Number(contract?.bill_rate ?? 0)
   const billUnit = String(contract?.bill_unit_type ?? 'hour')
+  const resolvedBillAmount = round2(calcAmount(approvedBillableHours, resolvedBillRate, billUnit))
 
   const { data: prevFin } = await supabase
     .from('visit_financials')
@@ -152,9 +154,16 @@ export async function syncVisitApprovalAndFinancialsOnApprove(params: {
     approved_actual_hours?: number | null
   } | null
 
+  const materiallyChanged =
+    prev != null &&
+    (round2(Number(prev.approved_billable_hours ?? 0)) !== approvedBillableHours ||
+      round2(Number(prev.approved_actual_hours ?? 0)) !== approvedActualHours ||
+      round2(Number(prev.pay_amount ?? 0)) !== resolvedPayAmount ||
+      round2(Number(prev.bill_amount ?? 0)) !== resolvedBillAmount)
+
   const { data: existingApproval, error: apprSelErr } = await supabase
     .from('visit_approvals')
-    .select('id, pay_rate, bill_rate, approved_actual_hours, approved_billable_hours')
+    .select('id, pay_rate, bill_rate')
     .eq('visit_time_entry_id', vteId)
     .maybeSingle()
   if (apprSelErr) return { ok: false, error: apprSelErr.message }
@@ -170,28 +179,32 @@ export async function syncVisitApprovalAndFinancialsOnApprove(params: {
   const payAmount = round2(calcAmount(approvedActualHours, frozenPayRate, payUnit))
   const billAmount = round2(calcAmount(approvedBillableHours, frozenBillRate, billUnit))
 
-  const previousActualHours =
-    prev?.approved_actual_hours != null
-      ? round2(Number(prev.approved_actual_hours))
-      : existingApproval?.approved_actual_hours != null
-        ? round2(Number(existingApproval.approved_actual_hours))
-        : null
-  const previousBillableHours =
-    prev?.approved_billable_hours != null
-      ? round2(Number(prev.approved_billable_hours))
-      : existingApproval?.approved_billable_hours != null
-        ? round2(Number(existingApproval.approved_billable_hours))
-        : null
+  const snapshot = {
+    previous: {
+      approved_billable_hours: prev?.approved_billable_hours ?? null,
+      approved_actual_hours: prev?.approved_actual_hours ?? null,
+      pay_rate: prev?.pay_rate ?? null,
+      pay_amount: prev?.pay_amount ?? null,
+      bill_rate: prev?.bill_rate ?? null,
+      bill_amount: prev?.bill_amount ?? null,
+    },
+    new: {
+      approved_billable_hours: approvedBillableHours,
+      approved_actual_hours: approvedActualHours,
+      pay_rate: frozenPayRate,
+      pay_amount: payAmount,
+      bill_rate: frozenBillRate,
+      bill_amount: billAmount,
+    },
+    materially_changed: materiallyChanged,
+    coordinator_note: note,
+  }
   const { error: histErr } = await supabase.from('visit_adjustment_history').insert({
     agency_id: visit.agency_id,
     visit_time_entry_id: vteId,
     changed_by_user_id: approvedByUserId,
     reason: prev ? 'coordinator_time_billing_update' : 'coordinator_time_billing_initial',
-    previous_actual_hours: previousActualHours,
-    current_actual_hours: approvedActualHours,
-    previous_billable_hours: previousBillableHours,
-    current_billable_hours: approvedBillableHours,
-    note: note,
+    comment: JSON.stringify(snapshot),
   })
   if (histErr) return { ok: false, error: histErr.message }
 
@@ -258,39 +271,19 @@ export async function clearVisitApprovalAndFinancialsOnVoid(params: {
 
   const { data: prevFin } = await supabase
     .from('visit_financials')
-    .select('pay_amount, bill_amount, approved_actual_hours, approved_billable_hours')
+    .select('pay_amount, bill_amount, approved_billable_hours')
     .eq('scheduled_visit_id', visit.id)
     .maybeSingle()
-
-  const { data: existingApproval } = await supabase
-    .from('visit_approvals')
-    .select('approved_actual_hours, approved_billable_hours')
-    .eq('visit_time_entry_id', vteId)
-    .maybeSingle()
-
-  const previousActualHours =
-    (prevFin as { approved_actual_hours?: number | null } | null)?.approved_actual_hours != null
-      ? round2(Number((prevFin as { approved_actual_hours?: number | null }).approved_actual_hours))
-      : existingApproval?.approved_actual_hours != null
-        ? round2(Number(existingApproval.approved_actual_hours))
-        : null
-  const previousBillableHours =
-    (prevFin as { approved_billable_hours?: number | null } | null)?.approved_billable_hours != null
-      ? round2(Number((prevFin as { approved_billable_hours?: number | null }).approved_billable_hours))
-      : existingApproval?.approved_billable_hours != null
-        ? round2(Number(existingApproval.approved_billable_hours))
-        : null
 
   const { error: histErr } = await supabase.from('visit_adjustment_history').insert({
     agency_id: visit.agency_id,
     visit_time_entry_id: vteId,
     changed_by_user_id: voidedByUserId,
     reason: 'coordinator_void_billing',
-    previous_actual_hours: previousActualHours,
-    current_actual_hours: null,
-    previous_billable_hours: previousBillableHours,
-    current_billable_hours: null,
-    note: note,
+    comment: JSON.stringify({
+      previous: prevFin ?? null,
+      coordinator_note: note,
+    }),
   })
   if (histErr) return { ok: false, error: histErr.message }
 

@@ -86,6 +86,7 @@ export default async function AgenciesPage() {
             contact_name: a.contact_name ?? '',
             contact_email: a.contact_email ?? '',
           }))}
+          detailBasePath="/pages/admin/agencies"
         />
       </div>
     </AdminLayout>

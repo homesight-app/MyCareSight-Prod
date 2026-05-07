@@ -42,7 +42,8 @@ export async function closeApplicationUpdate(supabase: Supabase, applicationId: 
 export async function insertApplication(
   supabase: Supabase,
   data: {
-    company_owner_id: string
+    company_owner_id?: string | null
+    agency_id?: string | null
     application_name: string
     state: string
     license_type_id?: string | null
@@ -415,6 +416,15 @@ export async function getApplicationsByStatus(supabase: Supabase, status: string
     .from('applications')
     .select('*')
     .eq('status', status)
+    .order('created_at', { ascending: false })
+}
+
+/** Get all applications for an agency (agency-centric view for admin/expert). */
+export async function getApplicationsByAgencyId(supabase: Supabase, agencyId: string) {
+  return supabase
+    .from('applications')
+    .select('*')
+    .eq('agency_id', agencyId)
     .order('created_at', { ascending: false })
 }
 
