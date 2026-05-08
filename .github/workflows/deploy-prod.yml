@@ -48,14 +48,6 @@ jobs:
             -f "backup_${TIMESTAMP}.sql"
           echo "Backup complete: backup_${TIMESTAMP}.sql"
 
-      - name: Install Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Run database migrations
-        run: supabase db push --db-url "${{ secrets.PROD_SUPABASE_DB_URL }}"
-
       - name: Install Vercel CLI
         run: npm install -g vercel@latest
 
