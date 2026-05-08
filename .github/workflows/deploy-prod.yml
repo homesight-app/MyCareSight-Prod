@@ -31,6 +31,7 @@ jobs:
         env:
           PGPASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
+          export PATH=/usr/lib/postgresql/17/bin:$PATH
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           pg_dump \
             --host="${{ secrets.PROD_DB_HOST }}" \
