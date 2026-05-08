@@ -25,12 +25,18 @@ jobs:
         run: npm run test:ci
 
       - name: Install PostgreSQL client
-        run: sudo apt-get install -y postgresql-client
+        run: sudo apt-get install -y postgresql-client-17
 
       - name: Backup production database
+        env:
+          PGPASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
         run: |
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          pg_dump "${{ secrets.PROD_SUPABASE_DB_URL }}" \
+          pg_dump \
+            --host="${{ secrets.PROD_DB_HOST }}" \
+            --port=5432 \
+            --username="${{ secrets.PROD_DB_USER }}" \
+            --dbname=postgres \
             --no-owner --no-privileges \
             -f "backup_${TIMESTAMP}.sql"
           echo "Backup complete: backup_${TIMESTAMP}.sql"
