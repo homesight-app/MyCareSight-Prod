@@ -3,18 +3,27 @@ import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
 import AdminLayout from '@/components/AdminLayout'
-import AdminApplicationDetailContent from '@/components/AdminApplicationDetailContent'
+import ApplicationDetailContent from '@/components/ApplicationDetailContent'
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
 
 export default async function AdminApplicationDetailPage({
-  params
+  params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ back?: string }>
 }) {
   const { user, profile } = await requireAdmin()
   const { id } = await params
+  const { back } = await searchParams
   const supabase = await createClient()
+
+  // Validate the back path to prevent open redirect — must start with /pages/
+  const backHref = back && decodeURIComponent(back).startsWith('/pages/')
+    ? decodeURIComponent(back)
+    : '/pages/admin/licenses'
+  const backLabel = back ? 'Back to Agency' : 'Back to License Applications'
 
   const [
     { count: unreadNotifications },
@@ -46,32 +55,27 @@ export default async function AdminApplicationDetailPage({
     ? await q.getAgencyNameById(supabase, (application as any).agency_id)
     : { data: null }
 
-  // Merge owner profile with application
-  const applicationWithOwner = {
-    ...application,
-    user_profiles: ownerProfile || null,
-    expert_profile: expertProfile
-  }
-
   return (
-    <AdminLayout 
-      user={{ id: user.id, email: user.email }} 
-      profile={profile} 
+    <AdminLayout
+      user={{ id: user.id, email: user.email }}
+      profile={profile}
       unreadNotifications={unreadNotifications || 0}
     >
       <div className="space-y-6">
         <Link
-          href="/pages/admin/licenses"
+          href={backHref}
           className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to License Applications
+          {backLabel}
         </Link>
-        <AdminApplicationDetailContent
-          application={applicationWithOwner}
+        <ApplicationDetailContent
+          application={application}
           documents={documents || []}
-          adminUserId={user.id}
+          ownerProfile={ownerProfile}
+          assignedExpertProfile={expertProfile}
           agencyName={agencyData?.name ?? null}
+          showInlineTabs={true}
         />
       </div>
     </AdminLayout>

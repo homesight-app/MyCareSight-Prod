@@ -98,6 +98,20 @@ export async function insertApplicationDocument(
   return supabase.from('application_documents').insert(data).select().single()
 }
 
+/** Replace the file of an existing application_document record (url, name, type, description). */
+export async function updateApplicationDocumentFile(
+  supabase: Supabase,
+  documentId: string,
+  applicationId: string,
+  data: { document_url: string; document_name: string; document_type: string | null; description: string | null }
+) {
+  return supabase
+    .from('application_documents')
+    .update(data)
+    .eq('id', documentId)
+    .eq('application_id', applicationId)
+}
+
 /** Application steps by application_id, ordered by step_order. */
 export async function getApplicationStepsByApplicationId(supabase: Supabase, applicationId: string) {
   return supabase
@@ -426,6 +440,27 @@ export async function getApplicationsByAgencyId(supabase: Supabase, agencyId: st
     .select('*')
     .eq('agency_id', agencyId)
     .order('created_at', { ascending: false })
+}
+
+/** Get application ids for an agency (for notification scoping). */
+export async function getApplicationIdsByAgencyId(supabase: Supabase, agencyId: string) {
+  return supabase.from('applications').select('id').eq('agency_id', agencyId)
+}
+
+/** Get one application by agency_id and assigned_expert_id (for expert send message). */
+export async function getApplicationByAgencyAndExpert(
+  supabase: Supabase,
+  agencyId: string,
+  expertUserId: string
+) {
+  return supabase
+    .from('applications')
+    .select('id')
+    .eq('agency_id', agencyId)
+    .eq('assigned_expert_id', expertUserId)
+    .order('last_updated_date', { ascending: false })
+    .limit(1)
+    .maybeSingle()
 }
 
 /** Get applications by statuses, ordered by created_at desc. */
