@@ -30,36 +30,20 @@ export default async function DashboardPage() {
   if (profile?.role === 'admin') redirect('/pages/admin')
   if (profile?.role === 'expert') redirect('/pages/expert/clients')
 
-  const { data: agencyRecord } = await q.getClientByCompanyOwnerIdWithAgency(supabase, session.user.id)
-  const agencyId = agencyRecord?.agency_id ?? null
+  const { data: up } = await q.getAgencyIdFromProfile(supabase, session.user.id)
+  const agencyId = up?.agency_id ?? null
 
-  const [ownLicensesResult, agencyLicensesResult, ownAppsResult, agencyAppsResult] = await Promise.all([
-    q.getLicensesByCompanyOwnerId(supabase, session.user.id),
+  const [licensesResult, applicationsResult, staffResult] = await Promise.all([
     agencyId ? q.getLicensesByAgencyId(supabase, agencyId) : Promise.resolve({ data: [] }),
-    q.getApplicationsByCompanyOwnerId(supabase, session.user.id),
     agencyId ? q.getApplicationsByAgencyId(supabase, agencyId) : Promise.resolve({ data: [] }),
+    agencyId ? q.getStaffMembersByAgencyId(supabase, agencyId, { status: 'active' }) : Promise.resolve({ data: [] }),
   ])
-  const seenLicIds = new Set<string>()
-  const licenses = [...(ownLicensesResult.data ?? []), ...(agencyLicensesResult.data ?? [])].filter((l) => {
-    if (seenLicIds.has(l.id)) return false
-    seenLicIds.add(l.id)
-    return true
-  })
-  const seenAppIds = new Set<string>()
-  const applicationsData = [...(ownAppsResult.data ?? []), ...(agencyAppsResult.data ?? [])].filter((a) => {
-    if (seenAppIds.has(a.id)) return false
-    seenAppIds.add(a.id)
-    return true
-  })
+  const licenses = licensesResult.data ?? []
+  const applicationsData = applicationsResult.data ?? []
   const applicationsForDashboard = applicationsData.filter(app =>
     ['requested', 'in_progress', 'under_review', 'needs_revision', 'approved'].includes(app.status ?? '')
   )
-  const { data: client } = agencyRecord?.id
-    ? { data: agencyRecord }
-    : await q.getClientByCompanyOwnerId(supabase, session.user.id)
-  const { data: staff } = client?.id
-    ? await q.getStaffMembersByCompanyOwnerId(supabase, session.user.id, { status: 'active' })
-    : { data: [] }
+  const staff = staffResult.data ?? []
   const staffIds = (staff || []).map((s: { id: string }) => s.id)
   const { data: staffLicensesData } = staffIds.length > 0
     ? await q.getApplicationsByStaffMemberIds(supabase, staffIds)
@@ -183,61 +167,6 @@ export default async function DashboardPage() {
   const expiringSoon = expiringLicenses + expiringStaffCertifications
   const unreadNotifications = unreadNotificationsCount ?? 0
 
-  // Debug logs for agency dashboard license reflection issues.
-  console.log('[AgencyDashboard][Debug] user', {
-    userId: session.user.id,
-    email: session.user.email,
-    role: profile?.role,
-  })
-  console.log('[AgencyDashboard][Debug] raw counts', {
-    licensesCount: licenses.length,
-    applicationsCount: (applicationsData ?? []).length,
-    applicationsForDashboardCount: applicationsForDashboard.length,
-    unifiedLicensesCount: unifiedLicenses.length,
-    unifiedDerivedCount: unifiedLicensesWithDerivedStatus.length,
-  })
-  console.log(
-    '[AgencyDashboard][Debug] raw licenses sample',
-    licenses.slice(0, 10).map(l => ({
-      id: l.id,
-      license_name: l.license_name,
-      state: l.state,
-      status: l.status,
-      expiry_date: l.expiry_date,
-      activated_date: l.activated_date,
-    }))
-  )
-  console.log(
-    '[AgencyDashboard][Debug] applications for dashboard sample',
-    applicationsForDashboard.slice(0, 10).map(a => ({
-      id: a.id,
-      application_name: a.application_name,
-      state: a.state,
-      status: a.status,
-      expiry_date: a.expiry_date,
-      started_date: a.started_date,
-      created_at: a.created_at,
-    }))
-  )
-  console.log(
-    '[AgencyDashboard][Debug] unified derived sample',
-    unifiedLicensesWithDerivedStatus.slice(0, 20).map(l => ({
-      id: l.id,
-      source: l.source,
-      license_name: l.license_name,
-      state: l.state,
-      rawStatus: l.status,
-      derivedStatus: l.derivedStatus,
-      expiry_date: l.expiry_date,
-    }))
-  )
-  console.log('[AgencyDashboard][Debug] dashboard card counts', {
-    activeLicenses,
-    expiringLicenses,
-    expiringStaffCertifications,
-    expiringSoon: expiringLicenses + expiringStaffCertifications,
-  })
-
   // Get recent licenses
   const recentLicenses = unifiedLicensesWithDerivedStatus
     .slice()
@@ -251,16 +180,6 @@ export default async function DashboardPage() {
       ...license,
       status: license.derivedStatus,
     })) || []
-  console.log(
-    '[AgencyDashboard][Debug] recent licenses displayed',
-    recentLicenses.map(l => ({
-      id: l.id,
-      source: l.source,
-      license_name: l.license_name,
-      status: l.status,
-      expiry_date: l.expiry_date,
-    }))
-  )
 
   // Get all licenses with status for Action Items
   const allLicensesWithStatus = unifiedLicensesWithDerivedStatus.map(license => ({

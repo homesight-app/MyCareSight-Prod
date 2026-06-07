@@ -104,7 +104,7 @@ export async function createApplicationForAgency(
   if (rpcError) return { error: rpcError.message, data: null }
 
   // Copy non-expert template steps. Admin/expert apps start directly as
-  // 'in_progress', bypassing the DB trigger that normally seeds these steps
+  // 'in_progress', Bypassing the DB trigger that normally seeds these steps
   // on the requested → in_progress transition.
   const { data: requirement } = await q.getLicenseRequirementByStateAndType(
     supabaseAdmin,

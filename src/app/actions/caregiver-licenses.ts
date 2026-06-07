@@ -4,7 +4,6 @@ import { getSession } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
 import { createAdminClient } from '@/lib/supabase/admin'
-import { resolveEffectiveCompanyOwnerUserId } from '@/lib/agency-scope'
 
 export type InsertCaregiverLicenseInput = {
   staffMemberId: string
@@ -31,20 +30,15 @@ export async function insertCaregiverLicenseApplicationAction(
   const userId = session.user.id
   const supabase = await createClient()
 
-  const { data: profile } = await q.getUserProfileFull(supabase, userId)
-  const effectiveOwnerId = await resolveEffectiveCompanyOwnerUserId(supabase, profile, userId)
-  if (!effectiveOwnerId) {
+  const { data: up } = await q.getAgencyIdFromProfile(supabase, userId)
+  const viewerAgencyId = up?.agency_id ?? null
+  if (!viewerAgencyId) {
     return { ok: false, error: 'No organization scope found for this user.' }
-  }
-
-  const { data: client, error: clientErr } = await q.getClientByCompanyOwnerIdWithAgency(supabase, effectiveOwnerId)
-  if (clientErr || !client?.id) {
-    return { ok: false, error: 'No client account found for this user.' }
   }
 
   const { data: staff, error: staffErr } = await supabase
     .from('caregiver_members')
-    .select('id, company_owner_id, agency_id, user_id')
+    .select('id, agency_id, user_id')
     .eq('id', input.staffMemberId)
     .maybeSingle()
 
@@ -56,13 +50,7 @@ export async function insertCaregiverLicenseApplicationAction(
     return { ok: false, error: 'Caregiver has no agency; cannot attach a credential.' }
   }
 
-  const sameClient = staff.company_owner_id === client.id
-  const sameAgency =
-    Boolean(client.agency_id) &&
-    Boolean(staff.agency_id) &&
-    client.agency_id === staff.agency_id
-
-  if (!sameClient && !sameAgency) {
+  if (staff.agency_id !== viewerAgencyId) {
     return {
       ok: false,
       error: 'You can only add licenses for caregivers in your organization.',
@@ -120,6 +108,24 @@ export async function insertCaregiverLicenseApplicationAction(
     if (!data?.id) {
       return { ok: false, error: 'License was not saved. Please try again.' }
     }
+
+    const { error: auditErr } = await supabase.from('audit_log').insert({
+      agency_id: row.agency_id,
+      table_name: 'caregiver_credentials',
+      record_id: data.id,
+      action: 'INSERT',
+      performed_by_user_id: userId,
+      details: {
+        caregiver_member_id: row.caregiver_member_id,
+        license_type:        row.license_type,
+        state:               row.state,
+        status:              row.status,
+        issue_date:          row.issue_date,
+        expiry_date:         row.expiry_date,
+      },
+    })
+    if (auditErr) console.error('[caregiver-licenses/insert] Audit log failed. credentialId=%s err=%s', data.id, auditErr.message)
+
     return { ok: true, id: data.id }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)

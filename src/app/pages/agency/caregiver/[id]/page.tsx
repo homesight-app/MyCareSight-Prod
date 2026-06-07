@@ -4,7 +4,6 @@ import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
 import DashboardLayout from '@/components/DashboardLayout'
 import CaregiverProfileContent from '@/components/CaregiverProfileContent'
-import { resolveEffectiveCompanyOwnerUserId } from '@/lib/agency-scope'
 
 export default async function CaregiverProfilePage({
   params,
@@ -22,15 +21,11 @@ export default async function CaregiverProfilePage({
 
   const supabase = await createClient()
   const { data: profile } = await q.getUserProfileFull(supabase, session.user.id)
-  const effectiveOwnerId = await resolveEffectiveCompanyOwnerUserId(supabase, profile, session.user.id)
-  const { data: client } = effectiveOwnerId
-    ? await q.getClientByCompanyOwnerIdWithAgency(supabase, effectiveOwnerId)
-    : { data: null }
-  if (!client?.id) redirect('/pages/agency/caregiver')
+  const { data: up } = await q.getAgencyIdFromProfile(supabase, session.user.id)
+  const agencyId = up?.agency_id ?? null
+  if (!agencyId) redirect('/pages/agency/caregiver')
 
-  const { data: staff, error: staffError } = client.agency_id
-    ? await q.getStaffMemberByIdAndAgencyId(supabase, staffId, client.agency_id)
-    : await q.getStaffMemberByIdWithAgencyOrCompanyOwner(supabase, staffId, client.id, null)
+  const { data: staff, error: staffError } = await q.getStaffMemberByIdAndAgencyId(supabase, staffId, agencyId)
 
   if (staffError || !staff) redirect('/pages/agency/caregiver')
 
@@ -67,6 +62,10 @@ export default async function CaregiverProfilePage({
     days_until_expiry: license.days_until_expiry,
   }))
 
+  const role = session.profile?.role ?? ''
+  const canManageNotes =
+    role === 'agency_admin' || role === 'company_owner' || role === 'care_coordinator'
+
   const profileCard = (
     <div className="max-w-4xl mx-auto mt-20">
       <div
@@ -83,6 +82,8 @@ export default async function CaregiverProfilePage({
                 ? `/pages/agency/clients/${clientId}`
                 : '/pages/agency/clients'
           }
+          canManageNotes={canManageNotes}
+          agencyId={agencyId}
         />
       </div>
     </div>

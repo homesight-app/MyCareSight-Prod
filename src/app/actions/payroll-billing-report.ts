@@ -2,8 +2,8 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
+import { getSession } from '@/lib/auth'
 import * as q from '@/lib/supabase/query'
-import { resolveEffectiveCompanyOwnerUserId } from '@/lib/agency-scope'
 import { appendCaregiverPayRateAction } from '@/app/actions/caregiver-pay-rates'
 import { fetchPayrollBillingReportRows, type PayrollBillingDetailRow } from '@/lib/payroll-billing-report'
 import type { PatientServiceContractRow } from '@/lib/supabase/query/patient-service-contracts'
@@ -11,20 +11,16 @@ import {
   patientServiceContractOverlapsDate,
   WEEKLY_HOURS_CONTRACT_TYPE,
 } from '@/lib/patient-service-contract-effective'
+import { patientFullName } from '@/lib/patient-name'
 
 const REPORT_PATH = '/pages/agency/reports/payroll-billing'
 
 async function getViewerAgencyId(): Promise<string | null> {
   const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const { data: { user } } = await supabase.auth.getUser()
   if (!user) return null
-  const { data: profile } = await q.getUserProfileFull(supabase, user.id)
-  const ownerId = await resolveEffectiveCompanyOwnerUserId(supabase, profile, user.id)
-  if (!ownerId) return null
-  const { data: ctx } = await q.getClientByCompanyOwnerIdWithAgency(supabase, ownerId)
-  return ctx?.agency_id ?? null
+  const { data: up } = await q.getAgencyIdFromProfile(supabase, user.id)
+  return up?.agency_id ?? null
 }
 
 export async function getPayrollBillingReportRowsAction(
@@ -137,10 +133,12 @@ export async function getRateManagerDataAction(): Promise<{
   const patientIds = Array.from(new Set(billDataFiltered.map((r) => r.patient_id)))
   const { data: pats } =
     patientIds.length > 0
-      ? await supabase.from('patients').select('id, full_name').in('id', patientIds)
-      : { data: [] as { id: string; full_name: string | null }[] }
+      ? await supabase.from('patients').select('id, first_name, last_name').in('id', patientIds)
+      : { data: [] as { id: string; first_name: string | null; last_name: string | null }[] }
 
-  const patientName = new Map((pats ?? []).map((p) => [p.id, p.full_name ?? 'Client']))
+  const patientName = new Map(
+    (pats ?? []).map((p) => [p.id, patientFullName(p as { first_name: string; last_name: string })])
+  )
 
   const billRows: RateManagerBillRow[] = billDataFiltered.map((r) => ({
     id: r.id as string,
@@ -180,6 +178,8 @@ export async function updatePatientServiceContractBillRateAction(
   bill_rate: number
 ): Promise<{ ok?: true; error?: string }> {
   if (!Number.isFinite(bill_rate) || bill_rate < 0) return { error: 'Invalid bill rate.' }
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated.' }
   const supabase = await createClient()
   const {
     data: contract,
@@ -193,7 +193,7 @@ export async function updatePatientServiceContractBillRateAction(
 
   const visitQuery = supabase
     .from('scheduled_visits')
-    .select('id, agency_id, patient_id, caregiver_member_id, visit_date, scheduled_start_time, scheduled_end_time')
+    .select('id, agency_id, patient_id, caregiver_member_id, visit_date, scheduled_start_time, scheduled_end_time, scheduled_end_date')
     .eq('status', 'completed')
     .eq('patient_id', contract.patient_id)
     .eq('service_type', contract.service_type)
@@ -230,7 +230,9 @@ export async function updatePatientServiceContractBillRateAction(
       if (!Number.isFinite(h)) return NaN
       return h * 60 + (Number.isFinite(m) ? m : 0)
     }
-    for (const v of withNoFrozen) {
+    const now = new Date().toISOString()
+    // Build all update payloads then fire a single batch upsert (single DB round-trip).
+    const updatePayloads = withNoFrozen.map((v) => {
       const a = toMinutes(v.scheduled_start_time as string | null)
       const b = toMinutes(v.scheduled_end_time as string | null)
       const scheduleHours = !Number.isFinite(a) || !Number.isFinite(b) || b <= a ? 0 : Math.round((((b - a) / 60) + Number.EPSILON) * 100) / 100
@@ -247,31 +249,31 @@ export async function updatePatientServiceContractBillRateAction(
           : unit === '15_min_unit'
             ? rate * Math.round(hours * 4)
             : rate * hours
-      const { error: snapErr } = await supabase
-        .from('visit_financials')
-        .update({
-          status:
-            String((fin as { status?: string | null } | undefined)?.status ?? '').toLowerCase() === 'voided'
-              ? 'voided'
-              : 'approved',
-          bill_rate: rate,
-          bill_amount: Math.round((amount + Number.EPSILON) * 100) / 100,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('scheduled_visit_id', v.id as string)
-      if (snapErr) return { error: snapErr.message }
-    }
+      return {
+        scheduled_visit_id: v.id as string,
+        status:
+          String((fin as { status?: string | null } | undefined)?.status ?? '').toLowerCase() === 'voided'
+            ? 'voided'
+            : 'approved',
+        bill_rate: rate,
+        bill_amount: Math.round((amount + Number.EPSILON) * 100) / 100,
+        updated_at: now,
+      }
+    })
+    const { error: snapErr } = await supabase
+      .from('visit_financials')
+      .upsert(updatePayloads, { onConflict: 'scheduled_visit_id' })
+    if (snapErr) return { error: snapErr.message }
   }
 
   if (visitIds.length > 0) {
-    const [{ data: existingFinancialRows, error: finSelErr }, { data: timeEntries, error: timeEntryErr }] = await Promise.all([
-      supabase.from('visit_financials').select('scheduled_visit_id').in('scheduled_visit_id', visitIds),
-      supabase.from('visit_time_entries').select('id, scheduled_visit_id').in('scheduled_visit_id', visitIds),
-    ])
-    if (finSelErr) return { error: finSelErr.message }
+    const { data: timeEntries, error: timeEntryErr } = await supabase
+      .from('visit_time_entries')
+      .select('id, scheduled_visit_id')
+      .in('scheduled_visit_id', visitIds)
     if (timeEntryErr) return { error: timeEntryErr.message }
 
-    const existing = new Set((existingFinancialRows ?? []).map((r) => r.scheduled_visit_id as string))
+    const existing = new Set(finByVisitId.keys())
     const timeEntryByVisitId = new Map((timeEntries ?? []).map((r) => [r.scheduled_visit_id as string, r.id as string]))
     const toInsert = nonPendingVisits
       .filter((v) => !existing.has(v.id as string))
@@ -285,10 +287,16 @@ export async function updatePatientServiceContractBillRateAction(
           return h * 60 + (Number.isFinite(m) ? m : 0)
         }
         const hoursFromSchedule = (() => {
+          const startDate = v.visit_date as string | null
+          const endDate = v.scheduled_end_date as string | null
+          const effectiveEnd = endDate || startDate
+          const dayDiff = (startDate && effectiveEnd)
+            ? Math.max(0, Math.round((new Date(effectiveEnd + 'T12:00:00').getTime() - new Date(startDate + 'T12:00:00').getTime()) / 86_400_000))
+            : 0
           const a = toMinutes(v.scheduled_start_time as string | null)
           const b = toMinutes(v.scheduled_end_time as string | null)
-          if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return 0
-          return Math.round((((b - a) / 60) + Number.EPSILON) * 100) / 100
+          if (!Number.isFinite(a) || !Number.isFinite(b)) return 0
+          return Math.round((Math.max(0, dayDiff * 24 * 60 + (b - a)) / 60 + Number.EPSILON) * 100) / 100
         })()
         const fin = finByVisitId.get(String(v.id))
         const hoursRaw = (fin as { approved_billable_hours?: number | null } | undefined)?.approved_billable_hours != null
@@ -314,8 +322,10 @@ export async function updatePatientServiceContractBillRateAction(
           status: 'approved',
           coordinator_note: null,
           pay_rate: 0,
+          pay_unit_type: 'hour',
           pay_amount: 0,
           bill_rate: rate,
+          bill_unit_type: String(contract.bill_unit_type ?? 'hour'),
           bill_amount: Math.round((billAmount + Number.EPSILON) * 100) / 100,
         }
       })
@@ -334,6 +344,23 @@ export async function updatePatientServiceContractBillRateAction(
     .update({ bill_rate, updated_at: new Date().toISOString() })
     .eq('id', id)
   if (error) return { error: error.message }
+
+  const { error: auditErr } = await supabase.from('audit_log').insert({
+    agency_id: contract.agency_id as string,
+    table_name: 'patient_service_contracts',
+    record_id: id,
+    action: 'UPDATE',
+    performed_by_user_id: session.user.id,
+    details: {
+      field:          'bill_rate',
+      old_bill_rate:  contract.bill_rate,
+      new_bill_rate:  bill_rate,
+      patient_id:     contract.patient_id,
+      service_type:   contract.service_type,
+    },
+  })
+  if (auditErr) console.error('[payroll/updateBillRate] Audit log failed. contractId=%s err=%s', id, auditErr.message)
+
   revalidatePath(REPORT_PATH)
   revalidatePath('/pages/agency/time-billing')
   return { ok: true }
