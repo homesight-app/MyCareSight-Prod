@@ -164,20 +164,15 @@ export async function getUserProfileFull(supabase: Supabase, userId: string) {
   return supabase.from('user_profiles').select('*').eq('id', userId).single()
 }
 
-/** Get staff members by company_owner_id (optional status filter), ordered by created_at desc. */
-export async function getStaffMembersByCompanyOwnerId(
-  supabase: Supabase,
-  companyOwnerId: string,
-  options?: { status?: string }
-) {
-  let query = supabase
-    .from('caregiver_members')
-    .select('*')
-    .eq('company_owner_id', companyOwnerId)
-    .order('created_at', { ascending: false })
-  if (options?.status) query = query.eq('status', options.status)
-  return query
+/** Get agency_id directly from user_profiles — works for all agency-scoped roles. */
+export async function getAgencyIdFromProfile(supabase: Supabase, userId: string) {
+  return supabase
+    .from('user_profiles')
+    .select('agency_id')
+    .eq('id', userId)
+    .maybeSingle()
 }
+
 
 /** Get staff members visible to an agency client (agency-wide with owner fallback). */
 export async function getStaffMembersByAgencyOrCompanyOwner(

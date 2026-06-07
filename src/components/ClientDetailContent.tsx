@@ -37,10 +37,14 @@ import {
   SquareArrowOutUpRight
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { createSignedStorageUrl, STORAGE_BUCKET } from '@/lib/supabase/storage'
 import { getThreeWeekRollingWindowPacific } from '@/lib/pct-week-horizon'
 import { expandSeriesOccurrences } from '@/lib/recurrence-dates'
 import * as q from '@/lib/supabase/query'
+import type { PatientAddress } from '@/lib/supabase/query/patient-addresses'
 import { updatePatientDocumentsAction, upsertPatientCaregiverRequirementsAction } from '@/app/actions/patients'
+import { markScheduleMissedAction, markScheduleCancelledAction, markScheduleOnHoldAction, reinstateScheduleAction } from '@/app/actions/schedule-assignment-requests'
+import { addPatientAddressAction, updatePatientAddressAction, deletePatientAddressAction, setPrimaryPatientAddressAction } from '@/app/actions/patient-addresses'
 import { updatePatientServiceContractBillRateAction } from '@/app/actions/payroll-billing-report'
 import type { PatientRepresentative } from '@/lib/supabase/query/patients-representatives'
 import type { PatientDocument } from '@/lib/supabase/query/patients'
@@ -50,6 +54,8 @@ import type { PatientAdl, PatientAdlDaySchedule } from '@/lib/supabase/query/pat
 import type { ScheduleRow } from '@/lib/supabase/query/schedules'
 import type { CaregiverAvailabilitySlotRow } from '@/lib/supabase/query/caregiver-availability'
 import { visitStatusBadgeClass, visitStatusFromScheduleRow } from '@/lib/visit-status-styles'
+import { computeCaregiverMatches } from '@/lib/caregiver-matching'
+import { CaregiverAssignmentList } from '@/components/CaregiverAssignmentList'
 import type { PatientContractedHoursRow } from '@/lib/supabase/query/patient-contracted-hours'
 import type { PatientSkilledTaskDaySchedule, SkilledCarePlanTask } from '@/lib/supabase/query/skilled-care-plan'
 import type { PatientServiceContractRow } from '@/lib/supabase/query/patient-service-contracts'
@@ -58,7 +64,10 @@ import {
   patientServiceContractsSelectableForBillingVisit,
 } from '@/lib/patient-service-contract-effective'
 import Modal from '@/components/Modal'
+import InternalNotesPanel from '@/components/InternalNotesPanel'
 import zipcodes from 'zipcodes'
+import { patientFullName } from '@/lib/patient-name'
+import { US_STATES } from '@/lib/constants'
 
 const VISIT_TYPES = ['Routine', 'Medical', 'Therapy', 'Social', 'Other'] as const
 
@@ -188,7 +197,8 @@ function buildAssignedVisitTaskSlotSet(
 
 interface SmallClient {
   id: string
-  full_name: string
+  first_name: string
+  last_name: string
   date_of_birth: string
   age: number | null
   gender: string | null
@@ -219,11 +229,10 @@ interface SmallClient {
 type StaffMember = { id: string; user_id?: string; first_name?: string; last_name?: string; [key: string]: unknown }
 type BillingCodeOption = { id: string; code: string; name: string; unit_type: 'hour' | 'visit' | '15_min_unit' }
 const BILLING_CODE_PICKLIST_ORDER = ['S5125', 'S5126', 'T1019', 'T1020', 'G0156', 'G0159', '97110', '97530', '99509', 'W1726'] as const
-const CAREGIVER_DISTANCE_LIMIT_MILES = 20
 
 interface ClientDetailContentProps {
   client: SmallClient
-  allClients: Array<{ id: string; full_name: string }>
+  allClients: Array<{ id: string; first_name: string; last_name: string }>
   representatives?: PatientRepresentative[]
   caregiverRequirements?: CaregiverRequirement | null
   incidents?: PatientIncident[] | null
@@ -234,13 +243,19 @@ interface ClientDetailContentProps {
   skilledCarePlanTasks?: SkilledCarePlanTask[] | null
   skilledSchedules?: PatientSkilledTaskDaySchedule[] | null
   serviceContracts?: PatientServiceContractRow[] | null
+  initialAddresses?: PatientAddress[]
+  canManageNotes?: boolean
+  agencyId?: string
 }
 
-export default function ClientDetailContent({ client, allClients, representatives = [], caregiverRequirements: initialCaregiverRequirements = null, 
-  incidents: initialIncidents = [], adls: initialAdls = [], adlSchedules: initialAdlSchedules = [], staff: staffList = [], 
+export default function ClientDetailContent({ client, allClients, representatives = [], caregiverRequirements: initialCaregiverRequirements = null,
+  incidents: initialIncidents = [], adls: initialAdls = [], adlSchedules: initialAdlSchedules = [], staff: staffList = [],
   contractedHours: initialContractedHours = [], skilledCarePlanTasks: initialSkilledCarePlanTasks = [],
   skilledSchedules: skilledSchedulesProp,
-  serviceContracts: initialServiceContracts = [] }: ClientDetailContentProps) {
+  serviceContracts: initialServiceContracts = [],
+  initialAddresses = [],
+  canManageNotes = false,
+  agencyId }: ClientDetailContentProps) {
   const initialSkilledSchedules = skilledSchedulesProp ?? EMPTY_SKILLED_SCHEDULES
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -252,7 +267,8 @@ export default function ClientDetailContent({ client, allClients, representative
   const [loginAccess, setLoginAccess] = useState(client.login_access ?? true)
   const [isEditingPersonal, setIsEditingPersonal] = useState(false)
   const [editPersonalForm, setEditPersonalForm] = useState({
-    full_name: client.full_name,
+    first_name: client.first_name,
+    last_name: client.last_name,
     gender: client.gender ?? '',
     date_of_birth: client.date_of_birth,
     age: client.age ?? 0,
@@ -287,6 +303,14 @@ export default function ClientDetailContent({ client, allClients, representative
   const [downloadingDocId, setDownloadingDocId] = useState<string | null>(null)
   const documentFileInputRef = useRef<HTMLInputElement>(null)
   const primaryDiagnosisInputRef = useRef<HTMLInputElement>(null)
+
+  // --- Patient addresses ---
+  const [addresses, setAddresses] = useState<PatientAddress[]>(initialAddresses)
+  const [addressModalOpen, setAddressModalOpen] = useState(false)
+  const [editingAddress, setEditingAddress] = useState<PatientAddress | null>(null)
+  const [addressForm, setAddressForm] = useState({ label: 'Home', street_address: '', city: '', state: '', zip_code: '', is_primary: false })
+  const [isSavingAddress, setIsSavingAddress] = useState(false)
+  const [addressError, setAddressError] = useState<string | null>(null)
   const [caregiverRequirements, setCaregiverRequirements] = useState<string[]>(initialCaregiverRequirements?.skill_codes ?? [])
   const [caregiverReqsModalOpen, setCaregiverReqsModalOpen] = useState(false)
   const [caregiverReqsSelection, setCaregiverReqsSelection] = useState<string[]>([])
@@ -390,6 +414,8 @@ export default function ClientDetailContent({ client, allClients, representative
     bill_rate: '',
     end_date: '',
     note: '',
+    bill_mileage: false,
+    mileage_bill_rate_per_mile: '',
   })
   const [billingCodeOptions, setBillingCodeOptions] = useState<BillingCodeOption[]>([])
   /** Set when billing_codes query fails or returns no active rows (empty <select> otherwise looks like a UI bug). */
@@ -405,6 +431,8 @@ export default function ClientDetailContent({ client, allClients, representative
     effective_date: toLocalDateString(new Date()),
     end_date: '',
     note: '',
+    bill_mileage: false,
+    mileage_bill_rate_per_mile: '',
   })
   const [scheduleHover, setScheduleHover] = useState<{ dateStr: string; startHour: number; endHourExclusive: number } | null>(null)
   const [scheduleLoading, setScheduleLoading] = useState(false)
@@ -421,6 +449,7 @@ export default function ClientDetailContent({ client, allClients, representative
   const [addVisitTab, setAddVisitTab] = useState<'details' | 'adls'>('details')
   const [visitForm, setVisitForm] = useState({
     date: '',
+    endDate: '',
     startTime: '09:00',
     endTime: '10:00',
     contractId: '',
@@ -434,6 +463,7 @@ export default function ClientDetailContent({ client, allClients, representative
     repeatMonthlyRules: [] as { ordinal: number | null; weekday: number | null }[],
     repeatStart: '',
     repeatEnd: '',
+    addressId: '',
   })
   const [visitAdlSelected, setVisitAdlSelected] = useState<Set<string>>(new Set())
   const [isSavingVisit, setIsSavingVisit] = useState(false)
@@ -448,14 +478,14 @@ export default function ClientDetailContent({ client, allClients, representative
   const [caregiverAvailabilitySlots, setCaregiverAvailabilitySlots] = useState<CaregiverAvailabilitySlotRow[]>([])
   const [editVisitModalOpen, setEditVisitModalOpen] = useState(false)
   const [editingSchedule, setEditingSchedule] = useState<ScheduleRow | null>(null)
+  const [visitStatusModal, setVisitStatusModal] = useState<'missed' | 'cancelled' | 'on_hold' | null>(null)
+  const [visitStatusReason, setVisitStatusReason] = useState('')
   const [editRecurringApplyScope, setEditRecurringApplyScope] = useState<
     'this_visit' | 'this_and_future' | 'all_in_series' | 'weekday_in_series'
   >('this_visit')
 
   // Caregiver dropdown (Add/Edit Visit modal, Schedule tab).
   const [caregiverPickerOpen, setCaregiverPickerOpen] = useState(false)
-  const [caregiverPickerFilter, setCaregiverPickerFilter] = useState<'all' | 'available' | 'booked' | 'blocked'>('all')
-  const [caregiverPickerSort, setCaregiverPickerSort] = useState<'proximity' | 'availability'>('proximity')
   const caregiverPickerWrapRef = useRef<HTMLDivElement | null>(null)
   const caregiverPickerTriggerRef = useRef<HTMLButtonElement | null>(null)
   const caregiverPickerDropdownRef = useRef<HTMLDivElement | null>(null)
@@ -860,7 +890,8 @@ export default function ClientDetailContent({ client, allClients, representative
   const startEditPersonal = () => {
     const age = localClient.age ?? ageFromDob(localClient.date_of_birth)
     setEditPersonalForm({
-      full_name: localClient.full_name,
+      first_name: localClient.first_name,
+      last_name: localClient.last_name,
       gender: localClient.gender ?? '',
       date_of_birth: localClient.date_of_birth,
       age,
@@ -876,8 +907,8 @@ export default function ClientDetailContent({ client, allClients, representative
 
   const handleSavePersonal = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!editPersonalForm.full_name.trim()) {
-      setPersonalEditError('Full name is required.')
+    if (!editPersonalForm.first_name.trim()) {
+      setPersonalEditError('First name is required.')
       return
     }
     setIsSavingPersonal(true)
@@ -885,7 +916,8 @@ export default function ClientDetailContent({ client, allClients, representative
     try {
       const supabase = createClient()
       const { error } = await q.updatePatient(supabase, client.id, {
-        full_name: editPersonalForm.full_name.trim(),
+        first_name: editPersonalForm.first_name.trim(),
+        last_name: editPersonalForm.last_name.trim(),
         gender: editPersonalForm.gender || null,
         date_of_birth: editPersonalForm.date_of_birth,
       })
@@ -893,7 +925,8 @@ export default function ClientDetailContent({ client, allClients, representative
       const newAge = editPersonalForm.date_of_birth ? ageFromDob(editPersonalForm.date_of_birth) : localClient.age
       setLocalClient((prev) => ({
         ...prev,
-        full_name: editPersonalForm.full_name.trim(),
+        first_name: editPersonalForm.first_name.trim(),
+        last_name: editPersonalForm.last_name.trim(),
         gender: editPersonalForm.gender || null,
         date_of_birth: editPersonalForm.date_of_birth,
         age: newAge,
@@ -1113,15 +1146,10 @@ export default function ClientDetailContent({ client, allClients, representative
         }
         uploadedPaths.push(path)
 
-        const { data: { publicUrl } } = supabase.storage
-          .from('patient-documents')
-          .getPublicUrl(path)
-
         newDocs.push({
           id: docId,
           name: file.name,
           path,
-          url: publicUrl,
           uploaded_at: new Date().toISOString(),
           size: file.size,
         })
@@ -1164,11 +1192,14 @@ export default function ClientDetailContent({ client, allClients, representative
   }
 
   const downloadPatientDocument = async (doc: PatientDocument) => {
-    if (!doc.url) return
+    if (!doc.path) return
     setDownloadingDocId(doc.id)
     setDocumentUploadError(null)
     try {
-      const res = await fetch(doc.url)
+      const supabase = createClient()
+      const signedUrl = await createSignedStorageUrl(supabase, STORAGE_BUCKET.PATIENT, doc.path)
+      if (!signedUrl) throw new Error('Could not generate download link')
+      const res = await fetch(signedUrl)
       if (!res.ok) throw new Error(`Download failed (${res.status})`)
       const blob = await res.blob()
       const objectUrl = URL.createObjectURL(blob)
@@ -1181,11 +1212,7 @@ export default function ClientDetailContent({ client, allClients, representative
       document.body.removeChild(a)
       URL.revokeObjectURL(objectUrl)
     } catch {
-      try {
-        window.open(doc.url, '_blank', 'noopener,noreferrer')
-      } catch {
-        setDocumentUploadError('Could not download this document. Try opening it in a new tab from your browser.')
-      }
+      setDocumentUploadError('Could not download this document. Try again.')
     } finally {
       setDownloadingDocId(null)
     }
@@ -1365,21 +1392,16 @@ export default function ClientDetailContent({ client, allClients, representative
     })
   }
 
-  const getIncidentFileUrl = (incident: PatientIncident) => {
-    if (!incident.file_path) return null
-    const supabase = createClient()
-    const { data: { publicUrl } } = supabase.storage.from('patient-documents').getPublicUrl(incident.file_path)
-    return publicUrl
-  }
-
   const downloadIncidentFile = async (incident: PatientIncident) => {
-    const url = getIncidentFileUrl(incident)
-    if (!url) return
+    if (!incident.file_path) return
     const displayName = incident.file_name?.trim() || 'incident-report'
     setDownloadingIncidentId(incident.id)
     setIncidentListError(null)
     try {
-      const res = await fetch(url)
+      const supabase = createClient()
+      const signedUrl = await createSignedStorageUrl(supabase, STORAGE_BUCKET.PATIENT, incident.file_path)
+      if (!signedUrl) throw new Error('Could not generate download link')
+      const res = await fetch(signedUrl)
       if (!res.ok) throw new Error(`Download failed (${res.status})`)
       const blob = await res.blob()
       const objectUrl = URL.createObjectURL(blob)
@@ -1392,11 +1414,7 @@ export default function ClientDetailContent({ client, allClients, representative
       document.body.removeChild(a)
       URL.revokeObjectURL(objectUrl)
     } catch {
-      try {
-        window.open(url, '_blank', 'noopener,noreferrer')
-      } catch {
-        setIncidentListError('Could not download this file. Try again or open it in a new tab.')
-      }
+      setIncidentListError('Could not download this file. Try again or open it in a new tab.')
     } finally {
       setDownloadingIncidentId(null)
     }
@@ -2434,12 +2452,14 @@ export default function ClientDetailContent({ client, allClients, representative
     </div>
   )
 
-  type CaregiverAvailabilityStatus = 'available' | 'booked' | 'blocked'
-
-  const parseTimeToMinutes = (t: string) => {
-    const [h, m] = (t ?? '0:0').split(':').map(Number)
-    if (!Number.isFinite(h) || !Number.isFinite(m)) return null
-    return h * 60 + m
+  /** US ZIP: first 5 digits for `zipcodes` lookup (strips ZIP+4). */
+  const normalizeUsZipForLookup = (zip: unknown): string | null => {
+    if (zip === null || zip === undefined) return null
+    const s = String(zip).trim()
+    if (!s) return null
+    const digits = s.replace(/\D/g, '')
+    if (digits.length < 5) return null
+    return digits.slice(0, 5)
   }
 
   const utcTimeToLocalHmForDate = (raw: string | null | undefined, ymd: string): string => {
@@ -2452,125 +2472,48 @@ export default function ClientDetailContent({ client, allClients, representative
     return `${String(utcDate.getHours()).padStart(2, '0')}:${String(utcDate.getMinutes()).padStart(2, '0')}`
   }
 
-  /** US ZIP: first 5 digits for `zipcodes` lookup (strips ZIP+4). */
-  const normalizeUsZipForLookup = (zip: unknown): string | null => {
-    if (zip === null || zip === undefined) return null
-    const s = String(zip).trim()
-    if (!s) return null
-    const digits = s.replace(/\D/g, '')
-    if (digits.length < 5) return null
-    return digits.slice(0, 5)
-  }
-
-  const formatDistanceMiles = (miles: number) => {
-    if (!Number.isFinite(miles)) return '—'
-    // Always two decimal places in the caregiver picker (e.g. 5.00 mi, 12.30 mi).
-    return `${miles.toFixed(2)} mi`
-  }
-
-  const caregiverOptions = useMemo(() => {
-    const staff = staffList ?? []
-    const requiredSkills = caregiverRequirements ?? []
-
-    const clientZip = normalizeUsZipForLookup(localClient.zip_code)
-
-    const startMins = parseTimeToMinutes(visitForm.startTime)
-    const endMins = parseTimeToMinutes(visitForm.endTime)
-    const hasTime = startMins !== null && endMins !== null && (endMins as number) > (startMins as number)
+  const caregiverMatchOptions = useMemo(() => {
     const visitDate = visitForm.isRecurring ? visitForm.repeatStart : visitForm.date
-    const visitDayOfWeek =
-      visitDate && /^\d{4}-\d{2}-\d{2}$/.test(visitDate) ? new Date(`${visitDate}T12:00:00`).getDay() : null
-    const hasDate = !!visitDate && visitDayOfWeek !== null
-    const excludedScheduleId = editingSchedule?.id ?? null
+    const selectedAddr = addresses.find(a => a.id === visitForm.addressId)
+    const clientZip = normalizeUsZipForLookup(selectedAddr?.zip_code ?? localClient.zip_code)
 
-    const slotFullyCoversVisit = (slot: CaregiverAvailabilitySlotRow): boolean => {
-      if (!hasTime || !hasDate || !visitDate) return false
-      const slotStartLocal = utcTimeToLocalHmForDate(slot.start_time, visitDate)
-      const slotEndLocal = utcTimeToLocalHmForDate(slot.end_time, visitDate)
-      const slotStart = parseTimeToMinutes(slotStartLocal)
-      const slotEnd = parseTimeToMinutes(slotEndLocal)
-      if (slotStart === null || slotEnd === null) return false
-      if (!(slotStart <= (startMins as number) && slotEnd >= (endMins as number))) return false
+    const convertedSlots = caregiverAvailabilitySlots.map(slot => ({
+      caregiver_member_id: slot.caregiver_member_id,
+      is_recurring: slot.is_recurring,
+      start_time: visitDate ? (utcTimeToLocalHmForDate(slot.start_time, visitDate) || slot.start_time) : slot.start_time,
+      end_time: visitDate ? (utcTimeToLocalHmForDate(slot.end_time, visitDate) || slot.end_time) : slot.end_time,
+      days_of_week: slot.days_of_week,
+      repeat_start: slot.repeat_start,
+      repeat_end: slot.repeat_end,
+      specific_date: slot.specific_date,
+    }))
 
-      if (slot.is_recurring) {
-        const days = Array.isArray(slot.days_of_week) ? slot.days_of_week : []
-        if (!days.includes(visitDayOfWeek as number)) return false
-        if (slot.repeat_start && visitDate < slot.repeat_start) return false
-        if (slot.repeat_end && visitDate > slot.repeat_end) return false
-        return true
-      }
-
-      return slot.specific_date === visitDate
-    }
-
-    const options = staff.map((s) => {
-      const caregiverSkills = Array.isArray((s as any).skills) ? ((s as any).skills as string[]) : []
-
-      const requiredLen = requiredSkills.length
-      const matchCount = requiredLen === 0 ? 0 : requiredSkills.filter((sk) => caregiverSkills.includes(sk)).length
-      const skillMatchScore = requiredLen === 0 ? 1 : matchCount / requiredLen
-      const matchingAvailability = caregiverAvailabilitySlots.filter(
-        (slot) => slot.caregiver_member_id === s.id && slotFullyCoversVisit(slot)
-      )
-      const available = hasTime && hasDate && matchingAvailability.length > 0
-
-      let booked = false
-      if (available && hasTime) {
-        booked = (visitDateSchedules ?? [])
-          .filter((v) => v.id !== excludedScheduleId)
-          .some((v) => {
-            if (!v.caregiver_id) return false
-            if (v.caregiver_id !== s.id) return false
-            const vStart = parseTimeToMinutes(v.start_time ?? '0:00')
-            const vEnd = parseTimeToMinutes(v.end_time ?? '0:00')
-            if (vStart === null || vEnd === null) return false
-            const aStart = startMins as number
-            const aEnd = endMins as number
-            return aStart < vEnd && aEnd > vStart
-          })
-      }
-
-      const staffZip = normalizeUsZipForLookup((s as any).zip_code ?? (s as any).zipCode)
-      let distanceMiles: number
-      let distanceLabel: string
-      // console.log("clientZip: ",clientZip)
-      // console.log("staffZip: ",staffZip)
-      if (clientZip && staffZip) {
-        const d = zipcodes.distance(clientZip, staffZip)
-        if (d != null && Number.isFinite(d)) {
-          distanceMiles = d
-          distanceLabel = formatDistanceMiles(d)
-        } else {
-          distanceMiles = Number.POSITIVE_INFINITY
-          distanceLabel = '—'
-        }
-      } else {
-        distanceMiles = Number.POSITIVE_INFINITY
-        distanceLabel = '—'
-      }
-
-      const status: CaregiverAvailabilityStatus = available ? (booked ? 'booked' : 'available') : 'blocked'
-
-      return {
-        caregiver: s,
-        status,
-        distanceMiles,
-        distanceLabel,
-        skillMatchScore,
-      }
+    return computeCaregiverMatches({
+      staff: (staffList ?? []).map(s => ({
+        id: s.id,
+        first_name: (s as any).first_name ?? null,
+        last_name: (s as any).last_name ?? null,
+        zip_code: (s as any).zip_code ?? (s as any).zipCode ?? null,
+        skills: Array.isArray((s as any).skills) ? (s as any).skills : null,
+        job_title: (s as any).job_title ?? null,
+        role: (s as any).role ?? null,
+        phone: (s as any).phone ?? null,
+      })),
+      slots: convertedSlots,
+      conflicts: (visitDateSchedules ?? []).map(v => ({
+        id: v.id,
+        caregiver_id: v.caregiver_id,
+        start_time: v.start_time,
+        end_time: v.end_time,
+      })),
+      requiredSkills: caregiverRequirements ?? [],
+      clientZip,
+      visitDate,
+      visitStart: visitForm.startTime,
+      visitEnd: visitForm.endTime,
+      currentCaregiverId: null,
+      excludeConflictId: editingSchedule?.id ?? undefined,
     })
-
-    const eligibleByDistance = options.filter(
-      (o) => Number.isFinite(o.distanceMiles) && o.distanceMiles <= CAREGIVER_DISTANCE_LIMIT_MILES
-    )
-
-    eligibleByDistance.sort((a, b) => {
-      // Closest first, then best skill match.
-      if (a.distanceMiles !== b.distanceMiles) return a.distanceMiles - b.distanceMiles
-      return b.skillMatchScore - a.skillMatchScore
-    })
-
-    return eligibleByDistance
   }, [
     staffList,
     caregiverRequirements,
@@ -2580,55 +2523,16 @@ export default function ClientDetailContent({ client, allClients, representative
     visitForm.date,
     visitForm.repeatStart,
     visitForm.isRecurring,
+    visitForm.addressId,
+    addresses,
     visitDateSchedules,
     caregiverAvailabilitySlots,
     editingSchedule?.id,
   ])
 
   const renderCaregiverPicker = () => {
-    const selected = caregiverOptions.find((o) => o.caregiver.id === visitForm.caregiverId) ?? null
-    const selectedName = selected
-      ? `${selected.caregiver.first_name ?? ''} ${selected.caregiver.last_name ?? ''}`.trim()
-      : ''
-
-    const filtered = caregiverOptions.filter((o) =>
-      caregiverPickerFilter === 'all' ? true : o.status === caregiverPickerFilter
-    )
-    const sortedFiltered = [...filtered].sort((a, b) => {
-      if (caregiverPickerSort === 'availability') {
-        const rank = (s: CaregiverAvailabilityStatus) =>
-          s === 'available' ? 0 : s === 'booked' ? 1 : 2
-        const byStatus = rank(a.status) - rank(b.status)
-        if (byStatus !== 0) return byStatus
-      }
-      if (a.distanceMiles !== b.distanceMiles) return a.distanceMiles - b.distanceMiles
-      return b.skillMatchScore - a.skillMatchScore
-    })
-
-    const pillForStatus = (status: CaregiverAvailabilityStatus) => {
-      if (status === 'available') {
-        return (
-          <span className="inline-flex items-center gap-1 border border-green-200 bg-green-50 text-green-700 rounded-md px-2 py-0.5 text-xs font-semibold">
-            <Check className="w-3 h-3" />
-            Available
-          </span>
-        )
-      }
-      if (status === 'booked') {
-        return (
-          <span className="inline-flex items-center gap-1 border border-amber-200 bg-amber-50 text-amber-700 rounded-md px-2 py-0.5 text-xs font-semibold">
-            <Clock className="w-3 h-3" />
-            Booked
-          </span>
-        )
-      }
-      return (
-        <span className="inline-flex items-center gap-1 border border-red-200 bg-red-50 text-red-700 rounded-md px-2 py-0.5 text-xs font-semibold">
-          <X className="w-3 h-3" />
-          Not Available
-        </span>
-      )
-    }
+    const selectedOption = caregiverMatchOptions.find(o => o.id === visitForm.caregiverId)
+    const selectedName = selectedOption?.name ?? ''
 
     const menuPanel = (
       <div
@@ -2644,154 +2548,17 @@ export default function ClientDetailContent({ client, allClients, representative
             : undefined
         }
       >
-        <div className="px-4 py-2 border-b border-gray-100 bg-white">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-              SORTED BY:{' '}
-              {caregiverPickerSort === 'proximity'
-                ? 'PROXIMITY'
-                : 'AVAILABILITY'}
-            </div>
-            <div className="inline-flex rounded-md border border-gray-200 bg-gray-100/80 p-0.5">
-              <button
-                type="button"
-                onClick={() => setCaregiverPickerSort('proximity')}
-                className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
-                  caregiverPickerSort === 'proximity'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-gray-600 hover:text-blue-700'
-                }`}
-              >
-                Proximity
-              </button>
-              <button
-                type="button"
-                onClick={() => setCaregiverPickerSort('availability')}
-                className={`px-2.5 py-1 text-[11px] font-semibold rounded transition-colors ${
-                  caregiverPickerSort === 'availability'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'text-gray-600 hover:text-emerald-700'
-                }`}
-              >
-                Availability
-              </button>
-            </div>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
-            <button
-              type="button"
-              className={`inline-flex items-center gap-2 border-0 bg-transparent p-0 ${
-                caregiverPickerFilter === 'available' ? 'font-semibold text-green-700' : 'text-green-700'
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-green-500" />
-              Available
-            </button>
-            <span className="text-gray-300">|</span>
-            <button
-              type="button"
-              className={`inline-flex items-center gap-2 border-0 bg-transparent p-0 ${
-                caregiverPickerFilter === 'booked' ? 'font-semibold text-amber-700' : 'text-amber-700'
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-amber-500" />
-              Booked
-            </button>
-            <span className="text-gray-300">|</span>
-            <button
-              type="button"
-              className={`inline-flex items-center gap-2 border-0 bg-transparent p-0 ${
-                caregiverPickerFilter === 'blocked' ? 'font-semibold text-red-700' : 'text-red-700'
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-red-500" />
-              Not Available
-            </button>
-          </div>
-        </div>
-
-        <div className="max-h-[240px] overflow-y-auto overflow-x-hidden">
-          {filtered.length === 0 ? (
-            <div className="px-4 py-6 text-center text-sm text-gray-500">No caregivers found within 20 miles.</div>
-          ) : (
-            sortedFiltered.map((o, idx) => {
-              const c = o.caregiver
-              const name = `${c.first_name ?? ''} ${c.last_name ?? ''}`.trim()
-              const role = String((c as any).role ?? '')
-              const phone = String((c as any).phone ?? '')
-              const isBest = idx === 0
-
-              return (
-                <div
-                  key={c.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    setVisitForm((p) => ({ ...p, caregiverId: c.id }))
-                    setCaregiverPickerOpen(false)
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      setVisitForm((p) => ({ ...p, caregiverId: c.id }))
-                      setCaregiverPickerOpen(false)
-                    }
-                  }}
-                  className={`w-full px-4 py-2 border-b border-gray-50 hover:bg-gray-50 text-left cursor-pointer ${visitForm.caregiverId === c.id ? 'bg-blue-50/60' : 'bg-white'}`}
-                >
-                  <div className="flex items-start justify-between gap-4 min-w-0">
-                    <div className="flex items-start gap-3 min-w-0 flex-1">
-                      <div
-                        className={`w-6 h-6 rounded-full border flex items-center justify-center text-[12px] font-semibold flex-shrink-0 ${
-                          isBest ? 'bg-blue-600 border-blue-600 text-white' : 'border-gray-200 text-gray-500'
-                        }`}
-                      >
-                        {idx + 1}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div className="text-sm font-semibold text-gray-900 truncate">{name}</div>
-                          {isBest && (
-                            <span className="inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200 flex-shrink-0">
-                              Best
-                            </span>
-                          )}
-                          <Link
-                            href={`/pages/agency/caregiver/${c.id}?clientId=${localClient.id}&embed=1`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex shrink-0 text-gray-400 hover:text-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
-                            aria-label="Open caregiver profile in new tab"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setCaregiverPickerOpen(false)
-                            }}
-                          >
-                            <SquareArrowOutUpRight className="w-4 h-4" aria-hidden />
-                          </Link>
-                        </div>
-                        {role ? <div className="text-[11px] text-gray-500 mt-0.5 truncate">{role}</div> : null}
-                        {phone ? (
-                          <div className="flex items-center gap-1 text-[11px] text-gray-500 mt-1 truncate">
-                            <Phone className="w-3 h-3 text-gray-400 shrink-0" />
-                            <span className="truncate">{phone}</span>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      {pillForStatus(o.status)}
-                      <div className="flex items-center gap-1 text-[12px] text-gray-500 mt-2 justify-end whitespace-nowrap">
-                        <MapPin className="w-4 h-4 text-gray-400 shrink-0" />
-                        <span>{o.distanceLabel}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )
-            })
-          )}
-        </div>
+        <CaregiverAssignmentList
+          variant="picker"
+          options={caregiverMatchOptions}
+          requiredSkills={caregiverRequirements ?? []}
+          selectedId={visitForm.caregiverId || null}
+          clientId={localClient.id}
+          onSelect={(id) => {
+            setVisitForm(p => ({ ...p, caregiverId: id }))
+            setCaregiverPickerOpen(false)
+          }}
+        />
       </div>
     )
 
@@ -2804,7 +2571,7 @@ export default function ClientDetailContent({ client, allClients, representative
           className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50 disabled:bg-gray-100 disabled:text-gray-500"
           disabled={isSavingVisit}
         >
-          <span className="block truncate" style={{ textAlign: 'left'}}>{selectedName || 'Select caregiver...'}</span>
+          <span className="block truncate" style={{ textAlign: 'left' }}>{selectedName || 'Select caregiver...'}</span>
         </button>
 
         {caregiverPickerOpen &&
@@ -2826,11 +2593,11 @@ export default function ClientDetailContent({ client, allClients, representative
 
   const openAddVisitModal = () => {
     const today = toLocalDateString(new Date())
+    const primaryAddr = addresses.find(a => a.is_primary)
     setCaregiverPickerOpen(false)
-    setCaregiverPickerFilter('all')
-    setCaregiverPickerSort('proximity')
     setVisitForm({
       date: today,
+      endDate: today,
       startTime: '09:00',
       endTime: '10:00',
       contractId: activeContracts[0]?.id ?? '',
@@ -2844,6 +2611,37 @@ export default function ClientDetailContent({ client, allClients, representative
       repeatMonthlyRules: [{ ordinal: null, weekday: null }],
       repeatStart: today,
       repeatEnd: '',
+      addressId: primaryAddr?.id ?? '',
+    })
+    setVisitAdlSelected(new Set())
+    setAddVisitTab('details')
+    setVisitError(null)
+    setScheduleLimitWarning(null)
+    setAddVisitModalOpen(true)
+  }
+
+  const openAddVisitModalForDate = (dateStr: string, hour: number) => {
+    const primaryAddr = addresses.find(a => a.is_primary)
+    const startTime = `${String(hour).padStart(2, '0')}:00`
+    const endTime = hour < 23 ? `${String(hour + 1).padStart(2, '0')}:00` : '23:59'
+    setCaregiverPickerOpen(false)
+    setVisitForm({
+      date: dateStr,
+      endDate: dateStr,
+      startTime,
+      endTime,
+      contractId: activeContracts[0]?.id ?? '',
+      description: '',
+      type: 'Routine',
+      caregiverId: '',
+      notes: '',
+      isRecurring: false,
+      repeatFrequency: '',
+      repeatDays: [],
+      repeatMonthlyRules: [{ ordinal: null, weekday: null }],
+      repeatStart: dateStr,
+      repeatEnd: '',
+      addressId: primaryAddr?.id ?? '',
     })
     setVisitAdlSelected(new Set())
     setAddVisitTab('details')
@@ -2856,8 +2654,7 @@ export default function ClientDetailContent({ client, allClients, representative
     if (!isSavingVisit) {
       setAddVisitModalOpen(false)
       setCaregiverPickerOpen(false)
-      setCaregiverPickerFilter('all')
-      setCaregiverPickerSort('proximity')
+
     }
   }
 
@@ -2865,12 +2662,11 @@ export default function ClientDetailContent({ client, allClients, representative
     const start = (schedule.start_time ?? '09:00').slice(0, 5)
     const end = (schedule.end_time ?? '10:00').slice(0, 5)
     setCaregiverPickerOpen(false)
-    setCaregiverPickerFilter('all')
-    setCaregiverPickerSort('proximity')
     setEditingSchedule(schedule)
     setEditRecurringApplyScope(schedule.is_recurring ? 'weekday_in_series' : 'this_visit')
     setVisitForm({
       date: schedule.date,
+      endDate: schedule.end_date ?? schedule.date,
       startTime: start,
       endTime: end,
       contractId: schedule.contract_id ?? '',
@@ -2890,6 +2686,7 @@ export default function ClientDetailContent({ client, allClients, representative
       })(),
       repeatStart: schedule.repeat_start ?? schedule.date,
       repeatEnd: schedule.repeat_end ?? '',
+      addressId: (schedule as { patient_address_id?: string }).patient_address_id ?? addresses.find(a => a.is_primary)?.id ?? '',
     })
     {
       const dow = getDayOfWeekDb(schedule.date)
@@ -2911,8 +2708,7 @@ export default function ClientDetailContent({ client, allClients, representative
       setEditingSchedule(null)
       setEditRecurringApplyScope('this_visit')
       setCaregiverPickerOpen(false)
-      setCaregiverPickerFilter('all')
-      setCaregiverPickerSort('proximity')
+
     }
   }
 
@@ -2996,6 +2792,10 @@ export default function ClientDetailContent({ client, allClients, representative
         effective_date: serviceContractForm.effective_date,
         end_date: serviceContractForm.end_date || null,
         note: serviceContractForm.note || null,
+        bill_mileage: serviceContractForm.bill_mileage,
+        mileage_bill_rate_per_mile: serviceContractForm.mileage_bill_rate_per_mile
+          ? Number(serviceContractForm.mileage_bill_rate_per_mile)
+          : null,
       })
       if (error || !data) {
         setServiceContractError(error?.message ?? 'Failed to save contract.')
@@ -3050,6 +2850,10 @@ export default function ClientDetailContent({ client, allClients, representative
       bill_rate: row.bill_rate != null ? String(Number(row.bill_rate)) : '',
       end_date: row.end_date ?? '',
       note: row.note ?? '',
+      bill_mileage: row.bill_mileage ?? false,
+      mileage_bill_rate_per_mile: row.mileage_bill_rate_per_mile != null
+        ? String(Number(row.mileage_bill_rate_per_mile))
+        : '',
     })
     setServiceContractEditError(null)
     setEditServiceContractModalOpen(true)
@@ -3090,6 +2894,10 @@ export default function ClientDetailContent({ client, allClients, representative
         contract_name: serviceContractEditForm.contract_name.trim() || null,
         end_date: nextEnd || null,
         note: serviceContractEditForm.note.trim() || null,
+        bill_mileage: serviceContractEditForm.bill_mileage,
+        mileage_bill_rate_per_mile: serviceContractEditForm.mileage_bill_rate_per_mile.trim()
+          ? Number(serviceContractEditForm.mileage_bill_rate_per_mile)
+          : null,
       })
       if (res.error) {
         setServiceContractEditError(res.error.message || 'Failed to save contract details.')
@@ -3317,6 +3125,22 @@ export default function ClientDetailContent({ client, allClients, representative
             : null,
         repeat_start: visitForm.isRecurring ? visitForm.repeatStart || null : null,
         repeat_end: visitForm.isRecurring && visitForm.repeatEnd ? visitForm.repeatEnd : null,
+        patient_address_id: visitForm.addressId || null,
+        end_date: visitForm.endDate && visitForm.endDate > visitForm.date ? visitForm.endDate : null,
+        end_day_offset: visitForm.endDate && visitForm.endDate > visitForm.date
+          ? Math.max(0, Math.round((new Date(visitForm.endDate + 'T12:00:00').getTime() - new Date(visitForm.date + 'T12:00:00').getTime()) / 86_400_000))
+          : 0,
+        mileage_miles: (() => {
+          if (!visitForm.caregiverId || !visitForm.addressId) return null
+          const selectedVisitAddr = addresses.find(a => a.id === visitForm.addressId)
+          const assignedCaregiver = (staffList ?? []).find(s => s.id === visitForm.caregiverId)
+          if (!selectedVisitAddr?.zip_code || !(assignedCaregiver as any)?.zip_code) return null
+          const from = normalizeUsZipForLookup((assignedCaregiver as any).zip_code)
+          const to = normalizeUsZipForLookup(selectedVisitAddr.zip_code)
+          if (!from || !to) return null
+          const d = zipcodes.distance(from, to)
+          return d != null && Number.isFinite(d) ? Math.round(d * 100) / 100 : null
+        })(),
       }
       if (visitForm.isRecurring) {
         const repeatStart = visitForm.repeatStart || datesToInsert[0]
@@ -3417,6 +3241,7 @@ export default function ClientDetailContent({ client, allClients, representative
             : null,
         repeat_start: visitForm.isRecurring ? visitForm.repeatStart || null : null,
         repeat_end: visitForm.isRecurring && visitForm.repeatEnd ? visitForm.repeatEnd : null,
+        end_date: visitForm.endDate && visitForm.endDate > dateToSave ? visitForm.endDate : null,
       }
       if (editingSchedule.is_recurring && editRecurringApplyScope !== 'this_visit') {
         // Keep each occurrence on its own calendar day for bulk recurring edits.
@@ -3460,55 +3285,64 @@ export default function ClientDetailContent({ client, allClients, representative
     }
   }
 
-  const handleMarkVisitMissed = async () => {
-    if (!editingSchedule) return
+  const refreshWeekSchedules = async () => {
+    const supabase = createClient()
+    const { data } = await q.getSchedulesByPatientIdAndDateRange(
+      supabase,
+      localClient.id,
+      scheduleWeekStartStr,
+      scheduleWeekEndStr
+    )
+    setWeekSchedules(data ?? [])
+  }
+
+  const handleConfirmVisitStatusChange = async () => {
+    if (!editingSchedule || !visitStatusModal) return
     setIsSavingVisit(true)
     try {
-      const supabase = createClient()
-      const { error } = await q.updateSchedule(supabase, editingSchedule.id, { status: 'missed' })
-      if (!error) {
-        const { data } = await q.getSchedulesByPatientIdAndDateRange(
-          supabase,
-          localClient.id,
-          scheduleWeekStartStr,
-          scheduleWeekEndStr
-        )
-        setWeekSchedules(data ?? [])
+      const id = editingSchedule.id
+      const reason = visitStatusReason
+      let result: { ok?: true; error?: string }
+      if (visitStatusModal === 'missed') result = await markScheduleMissedAction(id, reason)
+      else if (visitStatusModal === 'cancelled') result = await markScheduleCancelledAction(id, reason)
+      else result = await markScheduleOnHoldAction(id, reason)
+      if (result.error) {
+        setVisitError(result.error)
+      } else {
+        setVisitStatusModal(null)
+        setVisitStatusReason('')
+        await refreshWeekSchedules()
         setEditVisitModalOpen(false)
         setEditingSchedule(null)
         router.refresh()
-      } else {
-        setVisitError(error.message ?? 'Failed to mark as missed.')
       }
     } catch (e) {
-      setVisitError(e instanceof Error ? e.message : 'Failed to mark as missed.')
+      setVisitError(e instanceof Error ? e.message : 'Failed to update visit status.')
     } finally {
       setIsSavingVisit(false)
     }
+  }
+
+  const handleMarkVisitMissed = () => {
+    setVisitStatusModal('missed')
+    setVisitStatusReason('')
   }
 
   const handleMarkVisitUnmissed = async () => {
     if (!editingSchedule) return
     setIsSavingVisit(true)
     try {
-      const supabase = createClient()
-      const { error } = await q.updateSchedule(supabase, editingSchedule.id, { status: null })
-      if (!error) {
-        const { data } = await q.getSchedulesByPatientIdAndDateRange(
-          supabase,
-          localClient.id,
-          scheduleWeekStartStr,
-          scheduleWeekEndStr
-        )
-        setWeekSchedules(data ?? [])
+      const result = await reinstateScheduleAction(editingSchedule.id)
+      if (result.error) {
+        setVisitError(result.error)
+      } else {
+        await refreshWeekSchedules()
         setEditVisitModalOpen(false)
         setEditingSchedule(null)
         router.refresh()
-      } else {
-        setVisitError(error.message ?? 'Failed to mark as unmissed.')
       }
     } catch (e) {
-      setVisitError(e instanceof Error ? e.message : 'Failed to mark as unmissed.')
+      setVisitError(e instanceof Error ? e.message : 'Failed to reinstate visit.')
     } finally {
       setIsSavingVisit(false)
     }
@@ -3871,6 +3705,7 @@ export default function ClientDetailContent({ client, allClients, representative
     { id: 'documents', label: 'Documents' },
     { id: 'caregiver-requirements', label: 'Caregiver Competencies' },
     { id: 'incidents', label: 'Incidents' },
+    { id: 'notes', label: 'Notes' },
   ]
 
   const openSkilledTaskModal = () => {
@@ -4154,7 +3989,7 @@ export default function ClientDetailContent({ client, allClients, representative
             >
               {allClients.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.full_name}
+                  {patientFullName(c)}
                 </option>
               ))}
             </select>
@@ -4176,11 +4011,11 @@ export default function ClientDetailContent({ client, allClients, representative
       <div className="bg-white rounded-lg p-6 border border-gray-200 shadow-sm">
         <div className="flex items-start gap-4">
           <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center text-white font-semibold text-xl">
-            {getInitials(localClient.full_name)}
+            {getInitials(patientFullName(localClient))}
           </div>
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-2">
-              <h1 className="text-3xl font-bold text-gray-900">{localClient.full_name}</h1>
+              <h1 className="text-3xl font-bold text-gray-900">{patientFullName(localClient)}</h1>
               <span className={`px-3 py-1 text-xs font-semibold rounded ${
                 clientStatus === 'active' 
                   ? 'bg-green-100 text-green-800' 
@@ -4291,11 +4126,21 @@ export default function ClientDetailContent({ client, allClients, representative
                       </div>
                     )}
                     <div>
-                      <label className="block text-sm text-gray-600 mb-1">Full Name</label>
+                      <label className="block text-sm text-gray-600 mb-1">First Name</label>
                       <input
                         type="text"
-                        value={editPersonalForm.full_name}
-                        onChange={(e) => setEditPersonalForm((p) => ({ ...p, full_name: e.target.value }))}
+                        value={editPersonalForm.first_name}
+                        onChange={(e) => setEditPersonalForm((p) => ({ ...p, first_name: e.target.value }))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        disabled={isSavingPersonal}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-600 mb-1">Last Name</label>
+                      <input
+                        type="text"
+                        value={editPersonalForm.last_name}
+                        onChange={(e) => setEditPersonalForm((p) => ({ ...p, last_name: e.target.value }))}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                         disabled={isSavingPersonal}
                       />
@@ -4354,7 +4199,7 @@ export default function ClientDetailContent({ client, allClients, representative
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <span className="text-sm text-gray-600">Full Name:</span>
-                      <p className="text-sm font-medium text-gray-900">{localClient.full_name}</p>
+                      <p className="text-sm font-medium text-gray-900">{patientFullName(localClient)}</p>
                   </div>
                   <div>
                     <span className="text-sm text-gray-600">Gender:</span>
@@ -4517,17 +4362,8 @@ export default function ClientDetailContent({ client, allClients, representative
               <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-lg font-semibold text-gray-900">Contact Information</h3>
-                  {/* <button className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
-                    <Edit className="w-4 h-4 text-gray-600" />
-                  </button> */}
                 </div>
                 <div className="space-y-3">
-                  <div>
-                    <span className="text-sm text-gray-600">Address:</span>
-                    <p className="text-sm font-medium text-gray-900">
-                      {localClient.street_address} {localClient.city}, {localClient.state} {localClient.zip_code}
-                    </p>
-                  </div>
                   <div>
                     <span className="text-sm text-gray-600">Phone Number:</span>
                     <p className="text-sm font-medium text-gray-900">{localClient.phone_number}</p>
@@ -4537,6 +4373,87 @@ export default function ClientDetailContent({ client, allClients, representative
                     <p className="text-sm font-medium text-gray-900">{localClient.email_address}</p>
                   </div>
                 </div>
+              </div>
+
+              {/* Addresses Card */}
+              <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">Addresses</h3>
+                  <button
+                    onClick={() => {
+                      setEditingAddress(null)
+                      setAddressForm({ label: 'Home', street_address: '', city: '', state: '', zip_code: '', is_primary: addresses.length === 0 })
+                      setAddressError(null)
+                      setAddressModalOpen(true)
+                    }}
+                    className="flex items-center gap-1 text-sm font-medium text-blue-700 hover:underline"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Address
+                  </button>
+                </div>
+                {addresses.length === 0 ? (
+                  <p className="text-sm text-gray-400">No addresses on file.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {addresses.map((addr) => (
+                      <div key={addr.id} className="flex items-start justify-between gap-2 p-3 bg-white rounded border border-gray-200">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className="text-sm font-semibold text-gray-800">{addr.label}</span>
+                            {addr.is_primary && (
+                              <span className="text-xs font-semibold px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">Primary</span>
+                            )}
+                          </div>
+                          <p className="text-sm text-gray-600">{addr.street_address}, {addr.city}, {addr.state} {addr.zip_code}</p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!addr.is_primary && (
+                            <button
+                              title="Set as primary"
+                              onClick={async () => {
+                                const prev = addresses
+                                setAddresses(addresses.map(a => ({ ...a, is_primary: a.id === addr.id })))
+                                const { error } = await setPrimaryPatientAddressAction(localClient.id, addr.id)
+                                if (error) setAddresses(prev)
+                              }}
+                              className="text-xs text-blue-700 hover:underline px-2 py-1 rounded hover:bg-blue-50"
+                            >
+                              Set Primary
+                            </button>
+                          )}
+                          <button
+                            title="Edit address"
+                            onClick={() => {
+                              setEditingAddress(addr)
+                              setAddressForm({ label: addr.label, street_address: addr.street_address, city: addr.city, state: addr.state, zip_code: addr.zip_code, is_primary: addr.is_primary })
+                              setAddressError(null)
+                              setAddressModalOpen(true)
+                            }}
+                            className="p-1.5 hover:bg-gray-100 rounded"
+                          >
+                            <Edit className="w-3.5 h-3.5 text-gray-500" />
+                          </button>
+                          {!addr.is_primary && addresses.length > 1 && (
+                            <button
+                              title="Delete address"
+                              onClick={async () => {
+                                if (!confirm('Delete this address?')) return
+                                const prev = addresses
+                                setAddresses(addresses.filter(a => a.id !== addr.id))
+                                const { error } = await deletePatientAddressAction(addr.id, localClient.id)
+                                if (error) { setAddresses(prev); alert(error) }
+                              }}
+                              className="p-1.5 hover:bg-red-50 rounded"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Emergency Contact Card */}
@@ -4809,7 +4726,7 @@ export default function ClientDetailContent({ client, allClients, representative
                     </div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        {doc.url && (
+                        {doc.path && (
                           <button
                             type="button"
                             onClick={() => downloadPatientDocument(doc)}
@@ -4859,7 +4776,7 @@ export default function ClientDetailContent({ client, allClients, representative
                     <div>
                       <h3 className="text-lg font-bold text-gray-900">Required Caregiver Skills</h3>
                       <p className="text-sm text-gray-500 mt-0.5">
-                        Skills a caregiver must have to be matched to {localClient.full_name}.
+                        Skills a caregiver must have to be matched to {patientFullName(localClient)}.
                       </p>
                     </div>
                   </div>
@@ -4981,7 +4898,7 @@ export default function ClientDetailContent({ client, allClients, representative
                       </thead>
                       <tbody className="divide-y divide-gray-200">
                         {localIncidents.map((incident) => {
-                          const fileUrl = getIncidentFileUrl(incident)
+                          const hasFile = !!incident.file_path
                           return (
                             <tr key={incident.id} className="bg-white hover:bg-gray-50">
                               <td className="px-4 py-3 text-gray-900">{formatIncidentDate(incident.incident_date)}</td>
@@ -4989,18 +4906,23 @@ export default function ClientDetailContent({ client, allClients, representative
                               <td className="px-4 py-3 text-gray-900">{incident.primary_contact_person}</td>
                               <td className="px-4 py-3 text-gray-900 max-w-xs truncate" title={incident.description}>{incident.description}</td>
                               <td className="px-4 py-3">
-                                {incident.file_name && fileUrl ? (
-                                  <a href={fileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-600 hover:underline">
+                                {incident.file_name && hasFile ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => downloadIncidentFile(incident)}
+                                    disabled={downloadingIncidentId === incident.id}
+                                    className="inline-flex items-center gap-1 text-blue-600 hover:underline disabled:opacity-50"
+                                  >
                                     <FileText className="w-4 h-4 shrink-0" />
                                     {incident.file_name}
-                                  </a>
+                                  </button>
                                 ) : (
                                   <span className="text-gray-400">—</span>
                                 )}
                               </td>
                               <td className="px-4 py-3 text-gray-600">{formatIncidentUploadedAt(incident.created_at)}</td>
                               <td className="px-4 py-3 text-right">
-                                {fileUrl ? (
+                                {hasFile ? (
                                   <button
                                     type="button"
                                     onClick={() => downloadIncidentFile(incident)}
@@ -5039,6 +4961,20 @@ export default function ClientDetailContent({ client, allClients, representative
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'notes' && agencyId && (
+            <div className="space-y-4">
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+                Internal notes are visible only to agency admins and care coordinators — never to the client or caregiver.
+              </div>
+              <InternalNotesPanel
+                subjectType="patient"
+                subjectId={localClient.id}
+                agencyId={agencyId}
+                canManage={canManageNotes}
+              />
             </div>
           )}
 
@@ -5332,30 +5268,46 @@ export default function ClientDetailContent({ client, allClients, representative
                             </td>
                             {weekDates.map((d, colIdx) => {
                               const dateStr = toLocalDateString(d)
+
+                              // For multi-day visits: compute the effective start/end hour for this specific day.
+                              const getSegment = (s: typeof weekSchedules[0]) => {
+                                const startDate = s.date
+                                const endDate = s.end_date ?? s.date
+                                if (dateStr < startDate || dateStr > endDate) return null
+                                const isFirst = dateStr === startDate
+                                const isLast = dateStr === endDate
+                                const segStartH = isFirst ? parseStartHour(s.start_time ?? '00:00') : 0
+                                const segEndH = isLast ? parseEndHourExclusive(s.end_time ?? '00:00') || 24 : 24
+                                const totalDays = Math.round((new Date(endDate + 'T12:00:00').getTime() - new Date(startDate + 'T12:00:00').getTime()) / 86_400_000) + 1
+                                const dayIndex = Math.round((new Date(dateStr + 'T12:00:00').getTime() - new Date(startDate + 'T12:00:00').getTime()) / 86_400_000) + 1
+                                return { segStartH, segEndH, rowSpan: Math.max(1, segEndH - segStartH), totalDays, dayIndex }
+                              }
+
                               const block = weekSchedules.find((s) => {
-                                if (s.date !== dateStr) return false
-                                const startH = parseStartHour(s.start_time ?? '00:00')
-                                const endExcl = parseEndHourExclusive(s.end_time ?? '00:00') || startH + 1
-                                return startH === hour && endExcl > startH
+                                const seg = getSegment(s)
+                                return seg !== null && seg.segStartH === hour
                               })
                               const spanning = weekSchedules.some((s) => {
-                                if (s.date !== dateStr) return false
-                                const startH = parseStartHour(s.start_time ?? '00:00')
-                                const endExcl = parseEndHourExclusive(s.end_time ?? '00:00') || startH + 1
-                                return startH < hour && endExcl > hour
+                                const seg = getSegment(s)
+                                return seg !== null && seg.segStartH < hour && seg.segStartH + seg.rowSpan > hour
                               })
                               if (spanning) return null
                               if (block) {
+                                const seg = getSegment(block)!
+                                const { segStartH: sh, rowSpan } = seg
+                                const endHourExclusive = sh + rowSpan
+                                const isFirst = block.date === dateStr
                                 const startParts = (block.start_time ?? '0:0').split(':').slice(0, 2).map(Number)
                                 const endParts = (block.end_time ?? '0:0').split(':').slice(0, 2).map(Number)
-                                const sh = startParts[0] || 0
-                                const sm = startParts[1] || 0
+                                const sm = isFirst ? (startParts[1] || 0) : 0
                                 const eh = endParts[0] || 0
                                 const em = endParts[1] || 0
-                                const durationMins = Math.max(0, (eh * 60 + em) - (sh * 60 + sm))
-                                const durationHours = Math.ceil(durationMins / 60) || 1
-                                const rowSpan = Math.max(1, durationHours)
-                                const endHourExclusive = sh + durationHours
+                                const isLast = (block.end_date ?? block.date) === dateStr
+                                const segDurationMins = isFirst && isLast
+                                  ? Math.max(0, (eh * 60 + em) - (sh * 60 + sm))
+                                  : isFirst ? (24 * 60 - (sh * 60 + sm))
+                                  : isLast ? (eh * 60 + em)
+                                  : 24 * 60
                                 return (
                                   <td
                                     key={dateStr}
@@ -5385,12 +5337,15 @@ export default function ClientDetailContent({ client, allClients, representative
                                             <div className="font-medium">
                                               {block.start_time?.slice(0, 5)} - {block.end_time?.slice(0, 5)}
                                             </div>
+                                            {seg.totalDays > 1 && (
+                                              <div className="text-xs opacity-70">Day {seg.dayIndex} of {seg.totalDays}</div>
+                                            )}
                                             <div className="text-xs" style={{ color: colors.text }}>
                                               {block.type || 'Routine'}
                                             </div>
                                             <div className="mt-0.5 flex items-center gap-1 text-xs opacity-90" style={{ color: colors.text }}>
                                               <Clock className="w-3 h-3" />
-                                              {durationMins >= 60 ? `${Math.floor(durationMins / 60)}h` : `${durationMins}m`}
+                                              {segDurationMins >= 60 ? `${Math.floor(segDurationMins / 60)}h` : `${segDurationMins}m`}
                                             </div>
                                           </div>
                                           <span
@@ -5409,9 +5364,13 @@ export default function ClientDetailContent({ client, allClients, representative
                               return (
                                 <td
                                   key={dateStr}
-                                  className="border-b border-r border-gray-200 p-0 text-center last:border-r-0"
+                                  className="border-b border-r border-gray-200 p-0 text-center last:border-r-0 cursor-pointer hover:bg-blue-50 group"
                                   style={{ height: '3rem' }}
-                                />
+                                  onClick={() => openAddVisitModalForDate(dateStr, hour)}
+                                  title="Click to add a visit"
+                                >
+                                  <span className="flex items-center justify-center h-full text-blue-300 text-xl leading-none select-none opacity-0 group-hover:opacity-100">+</span>
+                                </td>
                               )
                             })}
                           </tr>
@@ -6189,7 +6148,7 @@ export default function ClientDetailContent({ client, allClients, representative
             </div>
             <div>
               <h2 className="text-lg font-bold text-gray-900">
-                Required Caregiver Skills — {localClient.full_name}
+                Required Caregiver Skills — {patientFullName(localClient)}
               </h2>
               <p className="text-sm text-gray-500 mt-1">
                 Select all skills a caregiver must have to be assigned to this client.
@@ -6368,7 +6327,7 @@ export default function ClientDetailContent({ client, allClients, representative
       <Modal
         isOpen={incidentModalOpen}
         onClose={closeIncidentModal}
-        title={`File Incident Report — ${localClient.full_name}`}
+        title={`File Incident Report — ${patientFullName(localClient)}`}
         size="md"
       >
         <form onSubmit={handleSaveIncident} className="space-y-4">
@@ -6855,7 +6814,7 @@ export default function ClientDetailContent({ client, allClients, representative
         isOpen={addVisitModalOpen}
         onClose={closeAddVisitModal}
         title="Add Visit"
-        subtitle={`Add a new visit for ${localClient.full_name}.`}
+        subtitle={`Add a new visit for ${patientFullName(localClient)}.`}
         headerAccessory={visitModalHeaderTabs}
         size="lg"
       >
@@ -6863,16 +6822,33 @@ export default function ClientDetailContent({ client, allClients, representative
           <div className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date {!visitForm.isRecurring && '*'}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date {!visitForm.isRecurring && '*'}</label>
                 <input
                   type="date"
                   value={visitForm.date}
-                  onChange={(e) => setVisitForm((p) => ({ ...p, date: e.target.value }))}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, date: e.target.value, endDate: p.endDate < e.target.value ? e.target.value : p.endDate }))}
                   className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-500"
                   disabled={isSavingVisit || visitForm.isRecurring}
                 />
                 {visitForm.isRecurring && (
                   <p className="mt-1 text-xs text-gray-500">Ignored when Recurring is on. Use Start/End Date in Recurring section.</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End Date {!visitForm.isRecurring && '*'}</label>
+                <input
+                  type="date"
+                  value={visitForm.endDate}
+                  min={visitForm.date}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, endDate: e.target.value }))}
+                  className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-500"
+                  disabled={isSavingVisit || visitForm.isRecurring}
+                />
+                {visitForm.endDate > visitForm.date && (
+                  <p className="mt-1 text-xs text-blue-600">
+                    {Math.round((new Date(visitForm.endDate + 'T12:00:00').getTime() - new Date(visitForm.date + 'T12:00:00').getTime()) / 86_400_000) + 1}-day visit
+                    {visitForm.isRecurring && ' · each occurrence runs this many days'}
+                  </p>
                 )}
               </div>
             </div>
@@ -6898,6 +6874,24 @@ export default function ClientDetailContent({ client, allClients, representative
                 />
               </div>
             </div>
+            {addresses.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Visit Location</label>
+                <select
+                  value={visitForm.addressId}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, addressId: e.target.value }))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm bg-white text-gray-900"
+                  disabled={isSavingVisit}
+                >
+                  <option value="">— No address selected —</option>
+                  {addresses.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}{a.is_primary ? ' (Primary)' : ''} — {a.street_address}, {a.city}, {a.state} {a.zip_code}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">Billing Contract <span className="text-red-500">*</span></label>
@@ -7274,7 +7268,7 @@ export default function ClientDetailContent({ client, allClients, representative
         isOpen={editVisitModalOpen}
         onClose={closeEditVisitModal}
         title="Edit Visit"
-        subtitle={`Edit visit for ${localClient.full_name}.`}
+        subtitle={`Edit visit for ${patientFullName(localClient)}.`}
         headerAccessory={visitModalHeaderTabs}
         size="lg"
       >
@@ -7282,16 +7276,33 @@ export default function ClientDetailContent({ client, allClients, representative
           <div className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date {!visitForm.isRecurring && '*'}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date {!visitForm.isRecurring && '*'}</label>
                 <input
                   type="date"
                   value={visitForm.date}
-                  onChange={(e) => setVisitForm((p) => ({ ...p, date: e.target.value }))}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, date: e.target.value, endDate: p.endDate < e.target.value ? e.target.value : p.endDate }))}
                   className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-500"
                   disabled={isSavingVisit || visitForm.isRecurring}
                 />
                 {visitForm.isRecurring && (
                   <p className="mt-1 text-xs text-gray-500">Ignored when Recurring is on. Use Start/End Date in Recurring section.</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End Date {!visitForm.isRecurring && '*'}</label>
+                <input
+                  type="date"
+                  value={visitForm.endDate}
+                  min={visitForm.date}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, endDate: e.target.value }))}
+                  className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-500"
+                  disabled={isSavingVisit || visitForm.isRecurring}
+                />
+                {visitForm.endDate > visitForm.date && (
+                  <p className="mt-1 text-xs text-blue-600">
+                    {Math.round((new Date(visitForm.endDate + 'T12:00:00').getTime() - new Date(visitForm.date + 'T12:00:00').getTime()) / 86_400_000) + 1}-day visit
+                    {visitForm.isRecurring && ' · each occurrence runs this many days'}
+                  </p>
                 )}
               </div>
             </div>
@@ -7317,6 +7328,24 @@ export default function ClientDetailContent({ client, allClients, representative
                 />
               </div>
             </div>
+            {addresses.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Visit Location</label>
+                <select
+                  value={visitForm.addressId}
+                  onChange={(e) => setVisitForm((p) => ({ ...p, addressId: e.target.value }))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm bg-white text-gray-900"
+                  disabled={isSavingVisit}
+                >
+                  <option value="">— No address selected —</option>
+                  {addresses.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}{a.is_primary ? ' (Primary)' : ''} — {a.street_address}, {a.city}, {a.state} {a.zip_code}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">Billing Contract <span className="text-red-500">*</span></label>
@@ -7633,26 +7662,44 @@ export default function ClientDetailContent({ client, allClients, representative
           <p className="mt-4 text-sm text-yellow-600 bg-yellow-100 border border-yellow-200 p-2 rounded">{visitError}</p>
         )}
         <div className="flex flex-wrap items-center justify-end gap-2 mt-6">
-          {editingSchedule?.status === 'missed' ? (
+          {editingSchedule?.status === 'missed' || editingSchedule?.status === 'cancelled' || editingSchedule?.status === 'on_hold' ? (
             <button
               type="button"
               onClick={handleMarkVisitUnmissed}
               disabled={isSavingVisit}
-              className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-[#a8701d] text-[#a8701d] rounded-lg text-sm font-medium hover:bg-[#f5e6d3] disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-gray-400 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
             >
               <Check className="w-4 h-4" />
-              Mark as Unmissed
+              Reinstate
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={handleMarkVisitMissed}
-              disabled={isSavingVisit}
-              className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-orange-500 text-orange-600 rounded-lg text-sm font-medium hover:bg-orange-50 disabled:opacity-50"
-            >
-              <X className="w-4 h-4" />
-              Mark as Missed
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleMarkVisitMissed}
+                disabled={isSavingVisit}
+                className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-orange-500 text-orange-600 rounded-lg text-sm font-medium hover:bg-orange-50 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+                Missed
+              </button>
+              <button
+                type="button"
+                onClick={() => { setVisitStatusModal('on_hold'); setVisitStatusReason('') }}
+                disabled={isSavingVisit}
+                className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-yellow-400 text-yellow-700 rounded-lg text-sm font-medium hover:bg-yellow-50 disabled:opacity-50"
+              >
+                On Hold
+              </button>
+              <button
+                type="button"
+                onClick={() => { setVisitStatusModal('cancelled'); setVisitStatusReason('') }}
+                disabled={isSavingVisit}
+                className="inline-flex items-center gap-1.5 px-4 py-2 border-2 border-rose-400 text-rose-600 rounded-lg text-sm font-medium hover:bg-rose-50 disabled:opacity-50"
+              >
+                Cancel Visit
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -7683,10 +7730,78 @@ export default function ClientDetailContent({ client, allClients, representative
         </div>
       </Modal>
 
+      {/* Visit status-change reason modal (Missed / On Hold / Cancel) */}
+      <Modal
+        isOpen={!!visitStatusModal}
+        onClose={() => { setVisitStatusModal(null); setVisitStatusReason('') }}
+        title={
+          visitStatusModal === 'missed' ? 'Mark Visit as Missed'
+          : visitStatusModal === 'cancelled' ? 'Cancel Visit'
+          : 'Put Visit On Hold'
+        }
+        size="md"
+      >
+        {visitStatusModal && (
+          <div className="space-y-4">
+            <div className={`rounded-lg border p-3 text-sm ${
+              visitStatusModal === 'missed' ? 'border-orange-200 bg-orange-50 text-orange-900'
+              : visitStatusModal === 'cancelled' ? 'border-rose-200 bg-rose-50 text-rose-900'
+              : 'border-yellow-200 bg-yellow-50 text-yellow-900'
+            }`}>
+              <div className="font-semibold">{patientFullName(localClient)}</div>
+              {editingSchedule && (
+                <div className="text-xs mt-0.5 opacity-80">{editingSchedule.date} · {editingSchedule.start_time ?? ''}{editingSchedule.end_time ? ` – ${editingSchedule.end_time}` : ''}</div>
+              )}
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700">
+                Reason
+                {visitStatusModal !== 'missed' && <span className="text-red-500 ml-0.5">*</span>}
+                {visitStatusModal === 'missed' && <span className="text-gray-400 ml-1">(optional)</span>}
+              </label>
+              <textarea
+                value={visitStatusReason}
+                onChange={(e) => setVisitStatusReason(e.target.value)}
+                placeholder={
+                  visitStatusModal === 'missed' ? 'e.g. Client hospitalized, caregiver no-show, weather...'
+                  : visitStatusModal === 'cancelled' ? 'e.g. Client request, scheduling conflict, duplicate booking...'
+                  : 'e.g. Awaiting authorization, client unavailable, pending assessment...'
+                }
+                rows={4}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <p className="text-xs text-gray-500">This will be logged in the audit trail with your name, timestamp, and reason, and will be traceable to this visit and client.</p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setVisitStatusModal(null); setVisitStatusReason('') }}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                disabled={isSavingVisit || (visitStatusModal !== 'missed' && !visitStatusReason.trim())}
+                onClick={handleConfirmVisitStatusChange}
+                className={`rounded-lg text-white px-4 py-2 text-sm font-medium disabled:opacity-60 flex items-center gap-2 ${
+                  visitStatusModal === 'missed' ? 'bg-orange-600 hover:bg-orange-700'
+                  : visitStatusModal === 'cancelled' ? 'bg-rose-600 hover:bg-rose-700'
+                  : 'bg-yellow-600 hover:bg-yellow-700'
+                }`}
+              >
+                {isSavingVisit && <Loader2 className="w-4 h-4 animate-spin" />}
+                {visitStatusModal === 'missed' ? 'Confirm Missed' : visitStatusModal === 'cancelled' ? 'Confirm Cancellation' : 'Confirm On Hold'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       <Modal
         isOpen={serviceContractsModalOpen}
         onClose={closeManageLimitModal}
-        title={`Manage Service Contracts — ${localClient.full_name}`}
+        title={`Manage Service Contracts — ${patientFullName(localClient)}`}
         size="xl"
         closeOnBackdropClick={false}
       >
@@ -7758,6 +7873,31 @@ export default function ClientDetailContent({ client, allClients, representative
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Notes (optional)</label>
               <textarea value={serviceContractForm.note} onChange={(e) => setServiceContractForm((p) => ({ ...p, note: e.target.value }))} className="w-full rounded border border-gray-300 px-3 py-2 text-sm" rows={2} />
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={serviceContractForm.bill_mileage}
+                  onChange={(e) => setServiceContractForm((p) => ({ ...p, bill_mileage: e.target.checked }))}
+                  className="w-4 h-4 text-blue-600 rounded"
+                />
+                <span className="text-sm font-medium text-gray-700">Bill mileage to this client</span>
+              </label>
+              {serviceContractForm.bill_mileage && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Mileage rate per mile (leave blank to use agency default)</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    placeholder="e.g. 0.67"
+                    value={serviceContractForm.mileage_bill_rate_per_mile}
+                    onChange={(e) => setServiceContractForm((p) => ({ ...p, mileage_bill_rate_per_mile: e.target.value }))}
+                    className="w-40 rounded border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+              )}
             </div>
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               For the same contract type and service type, saving a new effective date closes the previous open-ended row on that date and starts the new row.
@@ -7945,6 +8085,31 @@ export default function ClientDetailContent({ client, allClients, representative
               placeholder="Optional"
             />
           </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={serviceContractEditForm.bill_mileage}
+                onChange={(e) => setServiceContractEditForm((p) => ({ ...p, bill_mileage: e.target.checked }))}
+                className="w-4 h-4 text-blue-600 rounded"
+              />
+              <span className="text-sm font-medium text-gray-700">Bill mileage to this client</span>
+            </label>
+            {serviceContractEditForm.bill_mileage && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Mileage rate per mile (leave blank to use agency default)</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  placeholder="e.g. 0.67"
+                  value={serviceContractEditForm.mileage_bill_rate_per_mile}
+                  onChange={(e) => setServiceContractEditForm((p) => ({ ...p, mileage_bill_rate_per_mile: e.target.value }))}
+                  className="w-40 rounded border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+            )}
+          </div>
           {serviceContractEditError ? <p className="text-sm text-red-600">{serviceContractEditError}</p> : null}
           <div className="flex justify-end gap-2">
             <button
@@ -7967,6 +8132,149 @@ export default function ClientDetailContent({ client, allClients, representative
           </div>
         </div>
       </Modal>
+
+      {/* Address Add / Edit Modal */}
+      {addressModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between rounded-t-xl">
+              <h2 className="text-lg font-bold text-gray-900">{editingAddress ? 'Edit Address' : 'Add Address'}</h2>
+              <button onClick={() => setAddressModalOpen(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                <X className="w-4 h-4 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              {addressError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">{addressError}</div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Label</label>
+                <select
+                  value={addressForm.label}
+                  onChange={(e) => setAddressForm(f => ({ ...f, label: e.target.value }))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm bg-white"
+                >
+                  <option>Home</option>
+                  <option>Work</option>
+                  <option>Facility</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Street Address *</label>
+                <input
+                  type="text"
+                  value={addressForm.street_address}
+                  onChange={(e) => setAddressForm(f => ({ ...f, street_address: e.target.value }))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="123 Main Street"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
+                  <input
+                    type="text"
+                    value={addressForm.city}
+                    onChange={(e) => setAddressForm(f => ({ ...f, city: e.target.value }))}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    placeholder="Austin"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">ZIP Code *</label>
+                  <input
+                    type="text"
+                    value={addressForm.zip_code}
+                    onChange={(e) => setAddressForm(f => ({ ...f, zip_code: e.target.value }))}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    placeholder="78701"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">State *</label>
+                <select
+                  value={addressForm.state}
+                  onChange={(e) => setAddressForm(f => ({ ...f, state: e.target.value }))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm bg-white"
+                >
+                  <option value="">Select state</option>
+                  {US_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="addr-is-primary"
+                  checked={addressForm.is_primary}
+                  disabled={editingAddress?.is_primary || addresses.length === 0}
+                  onChange={(e) => setAddressForm(f => ({ ...f, is_primary: e.target.checked }))}
+                  className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                />
+                <label htmlFor="addr-is-primary" className="text-sm text-gray-700">Set as primary address</label>
+              </div>
+            </div>
+            <div className="px-6 pb-6 flex justify-end gap-3">
+              <button
+                onClick={() => setAddressModalOpen(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isSavingAddress}
+                onClick={async () => {
+                  if (!addressForm.street_address.trim() || !addressForm.city.trim() || !addressForm.state || !addressForm.zip_code.trim()) {
+                    setAddressError('Street address, city, state, and ZIP code are required.')
+                    return
+                  }
+                  setIsSavingAddress(true)
+                  setAddressError(null)
+                  if (editingAddress) {
+                    const prev = addresses
+                    const updated = addresses.map(a => a.id === editingAddress.id
+                      ? { ...a, ...addressForm }
+                      : addressForm.is_primary ? { ...a, is_primary: false } : a)
+                    setAddresses(updated)
+                    const { error } = await updatePatientAddressAction(editingAddress.id, localClient.id, addressForm)
+                    if (error) { setAddresses(prev); setAddressError(error) }
+                    else setAddressModalOpen(false)
+                  } else {
+                    const { error, id } = await addPatientAddressAction(localClient.id, {
+                      patient_id: localClient.id,
+                      ...addressForm,
+                    })
+                    if (error) { setAddressError(error) }
+                    else {
+                      // Optimistically append the new address (server action revalidated path)
+                      const newAddr: PatientAddress = {
+                        id: id ?? crypto.randomUUID(),
+                        patient_id: localClient.id,
+                        agency_id: '',
+                        ...addressForm,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString(),
+                      }
+                      setAddresses(prev =>
+                        addressForm.is_primary
+                          ? [...prev.map(a => ({ ...a, is_primary: false })), newAddr]
+                          : [...prev, newAddr]
+                      )
+                      setAddressModalOpen(false)
+                    }
+                  }
+                  setIsSavingAddress(false)
+                }}
+                className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm font-medium hover:bg-gray-800 disabled:opacity-50 flex items-center gap-2"
+              >
+                {isSavingAddress && <Loader2 className="w-4 h-4 animate-spin" />}
+                {editingAddress ? 'Save Changes' : 'Add Address'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

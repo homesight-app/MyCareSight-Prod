@@ -2,9 +2,9 @@ import zipcodes from 'zipcodes'
 import type { Supabase } from '@/lib/supabase/types'
 import * as q from '@/lib/supabase/query'
 import type { ScheduleRow } from '@/lib/supabase/query/schedules'
-import { overallScorePercent, proximityPercentFromMiles } from '@/lib/visit-assignment-scoring'
+import { patientFullName } from '@/lib/patient-name'
 
-export type VisitStatus = 'completed' | 'missed' | 'in_progress' | 'scheduled' | 'unassigned'
+export type VisitStatus = 'completed' | 'missed' | 'cancelled' | 'on_hold' | 'in_progress' | 'scheduled' | 'unassigned'
 
 export type ReassignCandidateDTO = {
   id: string
@@ -34,6 +34,7 @@ export type AllVisitCardDTO = {
   caregiverName: string | null
   adlTasks: string[]
   notes: string | null
+  statusReason: string | null
   clientRequiredSkills: string[]
   reassignCandidates: ReassignCandidateDTO[]
 }
@@ -46,7 +47,8 @@ export type AllVisitsDashboardDTO = {
 
 type PatientRow = {
   id: string
-  full_name?: string | null
+  first_name?: string | null
+  last_name?: string | null
   zip_code?: string | null
   state?: string | null
   city?: string | null
@@ -141,6 +143,8 @@ function deriveVisitStatus(s: ScheduleRow): VisitStatus {
   const raw = (s.status ?? '').toLowerCase().trim()
   if (raw === 'completed') return 'completed'
   if (raw === 'missed') return 'missed'
+  if (raw === 'cancelled') return 'cancelled'
+  if (raw === 'on_hold') return 'on_hold'
   if (raw === 'in_progress' || raw === 'in progress') return 'in_progress'
   if (raw === 'unassigned') return 'unassigned'
   if (raw === 'scheduled') return 'scheduled'
@@ -151,6 +155,7 @@ function deriveVisitStatus(s: ScheduleRow): VisitStatus {
 function statusLabel(v: VisitStatus): string {
   if (v === 'in_progress') return 'In Progress'
   if (v === 'unassigned') return 'Unassigned'
+  if (v === 'on_hold') return 'On Hold'
   return v.charAt(0).toUpperCase() + v.slice(1)
 }
 
@@ -159,26 +164,19 @@ function typeLabel(s: ScheduleRow): string {
   return t || 'Routine'
 }
 
-function skillMatchForStaff(requiredSkills: string[], caregiverSkills: string[]): { percent: number; matched: string[] } {
-  const requiredLen = requiredSkills.length
-  if (requiredLen === 0) return { percent: 100, matched: [] }
-  const matched = requiredSkills.filter((sk) => caregiverSkills.includes(sk))
-  return { percent: Math.round((matched.length / requiredLen) * 100), matched }
-}
-
 export async function fetchAllVisitsDashboardData(supabase: Supabase): Promise<AllVisitsDashboardDTO> {
   const [visitsRes, patientsMinRes, staffMinRes] = await Promise.all([
     q.getAllScheduledVisitsAsScheduleRows(supabase),
-    supabase.from('patients').select('id, full_name').order('full_name', { ascending: true }),
+    supabase.from('patients').select('id, first_name, last_name').order('last_name', { ascending: true }),
     supabase.from('caregiver_members').select('id, first_name, last_name').order('first_name', { ascending: true }),
   ])
 
   const schedules = (visitsRes.error ? [] : (visitsRes.data ?? [])) as ScheduleRow[]
   const allPatientsData = patientsMinRes.data
   const allStaffDataAll = staffMinRes.data
-  const allClients = ((allPatientsData ?? []) as Array<{ id: string; full_name?: string | null }>).map((p) => ({
+  const allClients = ((allPatientsData ?? []) as Array<{ id: string; first_name?: string | null; last_name?: string | null }>).map((p) => ({
     id: p.id,
-    name: p.full_name?.trim() || 'Client',
+    name: patientFullName({ first_name: p.first_name ?? '', last_name: p.last_name ?? '' }),
   }))
   const allCaregivers = ((allStaffDataAll ?? []) as Array<{ id: string; first_name?: string | null; last_name?: string | null }>).map((s) => ({
     id: s.id,
@@ -187,15 +185,14 @@ export async function fetchAllVisitsDashboardData(supabase: Supabase): Promise<A
   if (schedules.length === 0) return { allVisits: [], allClients, allCaregivers }
 
   const patientIds = Array.from(new Set(schedules.map((s) => s.patient_id)))
-  const [{ data: patientsData }, { data: allStaffData }, { data: reqRows }] = await Promise.all([
-    supabase.from('patients').select('id, full_name, zip_code, state, city, street_address').in('id', patientIds),
-    supabase.from('caregiver_members').select('id, first_name, last_name, zip_code, skills, role, job_title'),
+  const [{ data: patientsData }, { data: reqRows }] = await Promise.all([
+    supabase.from('patients').select('id, first_name, last_name, zip_code, state, city, street_address').in('id', patientIds),
     q.getCaregiverRequirementsByPatientIds(supabase, patientIds),
   ])
 
   const patientById = new Map(((patientsData ?? []) as PatientRow[]).map((p) => [p.id, p]))
-  const allStaff = (allStaffData ?? []) as StaffRow[]
-  const staffById = new Map(allStaff.map((s) => [s.id, s]))
+  type MinStaffRow = { id: string; first_name?: string | null; last_name?: string | null }
+  const staffById = new Map<string, MinStaffRow>((allStaffDataAll ?? []).map((s) => [s.id, s]))
 
   const requirementsByPatient = new Map<string, string[]>()
   for (const row of reqRows ?? []) {
@@ -230,35 +227,9 @@ export async function fetchAllVisitsDashboardData(supabase: Supabase): Promise<A
     const patient = patientById.get(s.patient_id)
     const currentCaregiver = s.caregiver_id ? staffById.get(s.caregiver_id) : undefined
     const requiredSkills = requirementsByPatient.get(s.patient_id) ?? []
-    const clientZip = normalizeUsZipForLookup(patient?.zip_code)
-
-    const candidates: ReassignCandidateDTO[] = allStaff
-      .map((staff) => {
-        const staffZip = normalizeUsZipForLookup(staff.zip_code)
-        let distanceMiles = Number.POSITIVE_INFINITY
-        if (clientZip && staffZip) {
-          const d = zipcodes.distance(clientZip, staffZip)
-          if (d != null && Number.isFinite(d)) distanceMiles = d
-        }
-        const proximity = proximityPercentFromMiles(distanceMiles)
-        if (proximity === null) return null
-
-        const caregiverSkills = Array.isArray(staff.skills) ? staff.skills : []
-        const { percent: skillPct, matched } = skillMatchForStaff(requiredSkills, caregiverSkills)
-        return {
-          id: staff.id,
-          caregiverName: [staff.first_name, staff.last_name].filter(Boolean).join(' ') || 'Caregiver',
-          caregiverTitle: (staff.job_title && staff.job_title.trim()) || (staff.role && String(staff.role).trim()) || 'Caregiver',
-          distanceMiles,
-          skillMatchPercent: skillPct,
-          proximityPercent: proximity,
-          overallPercent: overallScorePercent(skillPct, proximity),
-          matchedSkills: matched,
-          isCurrent: s.caregiver_id === staff.id,
-        }
-      })
-      .filter((v): v is ReassignCandidateDTO => v !== null)
-      .sort((a, b) => b.overallPercent - a.overallPercent)
+    // Use visit's specific address ZIP if set; fall back to patient's default ZIP
+    const visitAddrZip = s.patient_address?.zip_code ?? null
+    const clientZip = normalizeUsZipForLookup(visitAddrZip ?? patient?.zip_code)
 
     const status = deriveVisitStatus(s)
     return {
@@ -271,14 +242,15 @@ export async function fetchAllVisitsDashboardData(supabase: Supabase): Promise<A
       statusLabel: statusLabel(status),
       typeLabel: typeLabel(s),
       clientId: s.patient_id,
-      clientName: patient?.full_name ?? 'Client',
+      clientName: patient ? patientFullName(patient as { first_name: string; last_name: string }) : 'Client',
       locationLabel: patient ? patientLocationLabel(patient) : '-',
       caregiverId: s.caregiver_id,
       caregiverName: currentCaregiver ? [currentCaregiver.first_name, currentCaregiver.last_name].filter(Boolean).join(' ') : null,
       adlTasks: decodeAdlCodes(s.adl_codes, taskNameById),
       notes: s.notes,
+      statusReason: s.status_reason ?? null,
       clientRequiredSkills: requiredSkills,
-      reassignCandidates: candidates,
+      reassignCandidates: [],
     }
   })
 

@@ -7,7 +7,6 @@ import * as q from '@/lib/supabase/query'
 import { useRouter } from 'next/navigation'
 import { createAgencyAdminAccount } from '@/app/actions/users'
 import { US_STATES } from '@/lib/constants'
-import { resolveEffectiveCompanyOwnerUserId } from '@/lib/agency-scope'
 
 type AddNewClientModalMode = 'agency_admin' | 'care_recipient'
 
@@ -39,7 +38,8 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
   const [agencyFormData, setAgencyFormData] = useState(AGENCY_FORM_INITIAL)
 
   const [formData, setFormData] = useState({
-    full_name: '',
+    first_name: '',
+    last_name: '',
     date_of_birth: '',
     street_address: '',
     city: '',
@@ -110,23 +110,17 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         return
       }
 
-      const { data: profile } = await q.getUserProfileFull(supabase, user.id)
-      const effectiveOwnerId = await resolveEffectiveCompanyOwnerUserId(supabase, profile, user.id)
-      if (!effectiveOwnerId) {
-        setError('Could not determine your organization scope. Please contact the administrator.')
-        setIsLoading(false)
-        return
-      }
-      const { data: clientContext } = await q.getClientByCompanyOwnerIdWithAgency(supabase, effectiveOwnerId)
-      if (!clientContext?.agency_id) {
+      const { data: up } = await q.getAgencyIdFromProfile(supabase, user.id)
+      if (!up?.agency_id) {
         setError('Your account is not linked to an agency. Please contact the administrator.')
         setIsLoading(false)
         return
       }
 
       const { data: insertedPatient, error: insertError } = await q.insertPatient(supabase, {
-        agency_id: clientContext.agency_id,
-        full_name: formData.full_name,
+        agency_id: up.agency_id,
+        first_name: formData.first_name,
+        last_name: formData.last_name,
         date_of_birth: formData.date_of_birth,
         street_address: formData.street_address,
         city: formData.city,
@@ -150,8 +144,23 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         return
       }
 
+      // Seed the initial primary address into patient_addresses
+      if (formData.street_address.trim()) {
+        await q.insertPatientAddress(supabase, {
+          patient_id: (insertedPatient as any).id,
+          agency_id: up.agency_id,
+          label: 'Home',
+          street_address: formData.street_address,
+          city: formData.city,
+          state: formData.state,
+          zip_code: formData.zip_code,
+          is_primary: true,
+        })
+      }
+
       setFormData({
-        full_name: '',
+        first_name: '',
+        last_name: '',
         date_of_birth: '',
         street_address: '',
         city: '',
@@ -333,18 +342,35 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
             </div>
           ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Full Name */}
+            {/* First Name */}
             <div>
-              <label htmlFor="full_name" className="block text-sm font-semibold text-gray-700 mb-2">
-                Full Name <span className="text-red-500">*</span>
+              <label htmlFor="first_name" className="block text-sm font-semibold text-gray-700 mb-2">
+                First Name <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
-                id="full_name"
-                name="full_name"
-                value={formData.full_name}
+                id="first_name"
+                name="first_name"
+                value={formData.first_name}
                 onChange={handleChange}
-                placeholder="John Doe"
+                placeholder="Jane"
+                required
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
+            {/* Last Name */}
+            <div>
+              <label htmlFor="last_name" className="block text-sm font-semibold text-gray-700 mb-2">
+                Last Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                id="last_name"
+                name="last_name"
+                value={formData.last_name}
+                onChange={handleChange}
+                placeholder="Doe"
                 required
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />

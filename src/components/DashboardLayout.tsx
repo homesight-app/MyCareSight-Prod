@@ -5,17 +5,18 @@ import Link from 'next/link'
 import Image from 'next/image'
 import { usePathname } from 'next/navigation'
 import { 
-  Home, 
+  Home,
   Medal,
-  Users, 
-  LogOut, 
+  Users,
+  LogOut,
   ChevronLeft,
   Menu,
   X,
   BarChart3,
   UserCircle,
   CalendarDays,
-  DollarSign
+  DollarSign,
+  Settings,
 } from 'lucide-react'
 import { signOut } from '@/app/actions/auth'
 import UserDropdown from './UserDropdown'
@@ -122,7 +123,10 @@ export default function DashboardLayout({
         { href: '/pages/agency/licenses', label: 'Licenses', icon: Medal },
         { href: '/pages/agency/clients', label: 'Clients', icon: UserCircle },
         { href: '/pages/agency/caregiver', label: 'Caregivers', icon: Users },
+        { href: '/pages/agency/care-visits', label: 'Care Visits', icon: CalendarDays },
+        { href: '/pages/agency/time-billing', label: 'Time & Billing', icon: DollarSign },
         { href: '/pages/agency/reports', label: 'Reports', icon: BarChart3 },
+        { href: '/pages/agency/configuration', label: 'Configuration', icon: Settings },
         // { href: '/pages/agency/messages', label: 'Messages', icon: MessageSquare },
       ]
 

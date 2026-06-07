@@ -57,24 +57,6 @@ export async function getClientByCompanyOwnerId(supabase: Supabase, companyOwner
   return supabase.from('agency_admins').select('id').eq('user_id', companyOwnerId).maybeSingle()
 }
 
-/** Agency admin id and agency_id by auth user id (for staff creation). */
-export async function getClientByCompanyOwnerIdWithAgency(supabase: Supabase, companyOwnerId: string) {
-  return supabase.from('agency_admins').select('id, agency_id').eq('user_id', companyOwnerId).single()
-}
-
-/** One company-owner auth user id for an agency (for coordinators / legacy owner_id scoping). */
-export async function getRepresentativeOwnerUserIdForAgency(supabase: Supabase, agencyId: string) {
-  const { data, error } = await supabase
-    .from('agency_admins')
-    .select('company_owner_id, user_id')
-    .eq('agency_id', agencyId)
-    .not('user_id', 'is', null)
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-  const uid = data?.company_owner_id ?? data?.user_id ?? null
-  return { data: uid, error }
-}
 
 export async function getAgencyNameById(supabase: Supabase, agencyId: string) {
   return supabase.from('agencies').select('name').eq('id', agencyId).single()
@@ -208,4 +190,29 @@ export async function getClientsByCompanyOwnerIds(
 ) {
   if (companyOwnerIds.length === 0) return { data: [], error: null }
   return supabase.from('agency_admins').select(select).in('user_id', companyOwnerIds)
+}
+
+/** Get the payroll configuration for an agency. Returns null if not yet configured. */
+export async function getAgencyConfiguration(supabase: Supabase, agencyId: string) {
+  return supabase
+    .from('agency_configurations')
+    .select('*')
+    .eq('agency_id', agencyId)
+    .maybeSingle()
+}
+
+/** Create or update the payroll configuration for an agency (upsert on agency_id). */
+export async function upsertAgencyConfiguration(
+  supabase: Supabase,
+  agencyId: string,
+  payload: Record<string, unknown>
+) {
+  return supabase
+    .from('agency_configurations')
+    .upsert(
+      { ...payload, agency_id: agencyId, updated_at: new Date().toISOString() },
+      { onConflict: 'agency_id' }
+    )
+    .select()
+    .single()
 }

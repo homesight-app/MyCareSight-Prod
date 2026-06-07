@@ -7,6 +7,7 @@ import type {
   ScheduleUnassignmentRequestRow,
 } from '@/lib/supabase/query/schedule-assignment-requests'
 import { overallScorePercent, proximityPercentFromMiles } from '@/lib/visit-assignment-scoring'
+import { patientFullName } from '@/lib/patient-name'
 
 export type AssignmentRequestCardDTO = {
   id: string
@@ -177,7 +178,8 @@ function formatResolvedAt(iso: string): string {
 
 type PatientRow = {
   id: string
-  full_name?: string | null
+  first_name?: string | null
+  last_name?: string | null
   zip_code?: string | null
   state?: string | null
   city?: string | null
@@ -359,7 +361,7 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
       ? { data: [] as PatientRow[], error: null }
       : await supabase
           .from('patients')
-          .select('id, full_name, zip_code, state, city, street_address')
+          .select('id, first_name, last_name, zip_code, state, city, street_address')
           .in('id', patientIds)
 
   if (patErr) {
@@ -422,7 +424,9 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
     const staff = staffById.get(row.caregiver_member_id)
     if (!patient || !staff) continue
 
-    const clientZip = normalizeUsZipForLookup(patient.zip_code)
+    // Use the visit's specific address ZIP if set; fall back to patient's default ZIP
+    const visitAddrZip = sched.patient_address?.zip_code ?? null
+    const clientZip = normalizeUsZipForLookup(visitAddrZip ?? patient.zip_code)
     const staffZip = normalizeUsZipForLookup(staff.zip_code)
     let distanceMiles = Number.POSITIVE_INFINITY
     if (clientZip && staffZip) {
@@ -479,7 +483,7 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
     visits.push({
       id: sched.id,
       visitTitle: visitTitleFromSchedule(sched, taskNameById),
-      clientName: patient.full_name ?? 'Client',
+      clientName: patientFullName(patient as { first_name: string; last_name: string }),
       dateLabel: formatScheduleDate(sched.date),
       timeLabel: formatTimeRange(sched.start_time, sched.end_time),
       locationLabel: patientLocationLabel(patient),
@@ -511,7 +515,7 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
       requestId: row.id,
       visitId: sched.id,
       visitTitle: visitTitleFromSchedule(sched, taskNameById),
-      clientName: patient.full_name ?? 'Client',
+      clientName: patientFullName(patient as { first_name: string; last_name: string }),
       dateLabel: formatScheduleDate(sched.date),
       timeLabel: formatTimeRange(sched.start_time, sched.end_time),
       locationLabel: patientLocationLabel(patient),
@@ -542,7 +546,7 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
       kind: row.status === 'approved' ? 'approved' : 'declined',
       caregiverName,
       visitTitle: visitTitleFromSchedule(sched, taskNameById),
-      clientName: patient.full_name ?? 'Client',
+      clientName: patientFullName(patient as { first_name: string; last_name: string }),
       visitDateLabel: formatScheduleDate(sched.date),
       resolvedAtLabel: formatResolvedAt(row.resolved_at),
       reason: (row.decline_reason ?? '').trim() || undefined,
@@ -562,7 +566,7 @@ export async function fetchVisitAssignmentDashboardData(supabase: Supabase): Pro
       kind: row.status === 'approved' ? 'approved' : 'declined',
       caregiverName,
       visitTitle: visitTitleFromSchedule(sched, taskNameById),
-      clientName: patient.full_name ?? 'Client',
+      clientName: patientFullName(patient as { first_name: string; last_name: string }),
       visitDateLabel: formatScheduleDate(sched.date),
       resolvedAtLabel: formatResolvedAt(row.resolved_at),
       reason: (row.decline_reason ?? '').trim() || undefined,
