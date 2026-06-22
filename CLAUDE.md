@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## New Feature mode
+
+When the user starts a message with **"New Feature:"**, switch into business analyst + technical architect mode before any implementation:
+
+1. **Ask clarifying questions** to fully understand the goal — who uses it, what problem it solves, edge cases, scale expectations, and any constraints (roles, permissions, HIPAA, existing data).
+2. **Propose a design** covering: data model changes (tables/columns), which roles can access it, UI entry points, server action shape, and any third-party integrations needed.
+3. **Suggest alternatives or enhancements** the user may not have thought of that would make the feature more scalable, easier to use, or better aligned with the existing architecture.
+4. **Do not write any code** until the user confirms the design. Use plan mode (`EnterPlanMode`) to capture the agreed design before implementation begins.
+
+The goal is a feature that is scalable, modern, and easy for end users — not just the quickest path to working code.
+
+---
+
 ## Commands
 
 ```bash
@@ -85,6 +100,21 @@ Never expose `createAdminClient()` output to the browser.
 **`createAdminClient()` is not a workaround for missing RLS policies.** If a role legitimately needs access to a table but RLS blocks it, write a migration to add the policy — do not reach for the admin client. Using the admin client to paper over an RLS gap leaves the gap permanently unfixed and creates a false sense of security.
 
 **RLS-blocked mutations fail silently.** Supabase returns `{ error: null }` when an UPDATE or DELETE is blocked by RLS if the query has no `.select()` after it — 0 rows are affected but no error is raised. Always verify mutations by adding `.select()` or checking affected row count, especially in server actions used by non-admin roles.
+
+### Auth boundary — keep Supabase auth imports inside `src/lib/`
+
+Never import from `@supabase/supabase-js` or call `supabase.auth.*` directly in pages, components, or server actions. All auth operations must go through the wrappers in `src/lib/auth.ts` and `src/lib/auth-helpers.ts`:
+- Session access → `getSession()` (`src/lib/auth.ts`)
+- Admin-only page guard → `requireAdmin()` (`src/lib/auth-helpers.ts`)
+- User creation / password changes → action functions in `src/app/actions/agency-users.ts` and `src/app/actions/users.ts`
+
+This keeps the auth provider (currently Supabase) swappable from a single layer. When NextAuth replaces Supabase auth, only `src/lib/auth.ts`, `src/lib/auth-helpers.ts`, and the Supabase client files need to change — no pages or components.
+
+### Storage — always go through `src/lib/storage/`
+
+Never call Supabase Storage SDK methods (`supabase.storage.*`) directly in pages, components, or server actions. All file upload, download, deletion, and signed-URL generation must go through wrapper functions in `src/lib/storage/` (create this module if it does not exist yet).
+
+This keeps the storage provider (currently Supabase Storage) swappable. When migrating to S3-compatible storage on Aptible, only `src/lib/storage/` needs to change.
 
 ### Query layer (`src/lib/supabase/query/`)
 

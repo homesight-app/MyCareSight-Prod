@@ -242,7 +242,7 @@ export default async function DashboardPage() {
       case 'document_rejected':
         return 'text-blue-500'
       default:
-        return 'text-purple-500'
+        return 'text-blue-500'
     }
   }
 
@@ -253,14 +253,6 @@ export default async function DashboardPage() {
       unreadNotifications={unreadNotifications}
     >
       <div className="space-y-4 sm:space-y-6">
-        {/* Welcome Section */}
-        <div>
-          <h1 className="text-xl sm:text-2xl lg:text-2xl font-bold text-gray-900 mb-2">Welcome Back</h1>
-          <p className="text-gray-600 text-xs sm:text-sm lg:text-sm">
-            Here&apos;s an overview of your home care licensing operations
-          </p>
-        </div>
-
         {/* Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {/* Active Licenses */}
@@ -303,8 +295,8 @@ export default async function DashboardPage() {
           {/* Notifications */}
           <div className="bg-white rounded-lg p-3 shadow-md border border-gray-100">
             <div className="flex items-center justify-between mb-2">
-              <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
-                <Bell className="w-4 h-4 text-purple-600" />
+              <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                <Bell className="w-4 h-4 text-blue-600" />
               </div>
             </div>
             <div className="text-lg font-bold text-gray-900 mb-0.5">{unreadNotifications}</div>

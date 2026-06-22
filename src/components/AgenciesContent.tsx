@@ -112,7 +112,7 @@ export default function AgenciesContent({
       <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
         {/* Header */}
         <div className="px-4 py-4 sm:px-6 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <h2 className="text-lg font-semibold text-gray-900">All Agencies</h2>
+          <h2 className="text-lg font-semibold text-gray-900"></h2>
           <button
             type="button"
             onClick={() => setModalOpen(true)}
@@ -143,7 +143,7 @@ export default function AgenciesContent({
                 }`}
               >
                 {label}
-                <span className={`ml-1.5 text-xs ${statusFilter === key ? 'text-purple-600' : 'text-gray-400'}`}>
+                <span className={`ml-1.5 text-xs ${statusFilter === key ? 'text-blue-600' : 'text-gray-400'}`}>
                   {counts[key]}
                 </span>
               </button>
@@ -158,7 +158,7 @@ export default function AgenciesContent({
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search by name or admin…"
-              className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none"
+              className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
             />
           </div>
         </div>
