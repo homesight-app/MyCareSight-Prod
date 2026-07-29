@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useRef, useState, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
@@ -24,19 +24,28 @@ import {
   Loader2,
   X,
   ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
   TrendingUp,
   ExternalLink,
+  Search,
+  MessageSquare,
+  StickyNote,
+  Eye,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import * as q from '@/lib/supabase/query'
 import { createSignedStorageUrl, STORAGE_BUCKET } from '@/lib/supabase/storage'
 import { updateAgency, type AgencyFormData } from '@/app/actions/agencies'
+import { fetchLeadDocumentsAction, fetchLeadNotesAction } from '@/app/actions/leads'
 import { LEAD_STAGES } from '@/lib/constants/lead-configs'
 import CreateLicenseModal from './CreateLicenseModal'
 import AgencyAdminsSection from './AgencyAdminsSection'
 import AgencyOnboardingLinkPanel from './AgencyOnboardingLinkPanel'
 import AgencyKeyStaffSection from './AgencyKeyStaffSection'
 import AgencyUsersTab from './AgencyUsersTab'
+import AgencyNotesTab from './AgencyNotesTab'
+import AgencyDocumentsTab from './AgencyDocumentsTab'
 import ApplyForNewLicenseButton from './ApplyForNewLicenseButton'
 import Modal from './Modal'
 import type { OnboardingToken, AgencyKeyStaff } from '@/lib/supabase/query'
@@ -153,6 +162,25 @@ interface AgencyLeadDocument {
   file_name: string | null
   document_type: string | null
   created_at: string
+}
+
+interface FetchedDocument {
+  id: string
+  document_name: string
+  file_url: string
+  file_name: string | null
+  document_type: string | null
+  description: string | null
+  created_at: string
+}
+
+interface FetchedNote {
+  id: string
+  author_id: string
+  content: string
+  note_type: string
+  created_at: string
+  author: { full_name: string | null } | { full_name: string | null }[] | null
 }
 
 interface AgencyDetailContentProps {
@@ -301,10 +329,76 @@ export default function AgencyDetailContent({
   const router = useRouter()
   const searchParams = useSearchParams()
   const rawTab = searchParams.get('tab')
-  const initialTab: 'licenses' | 'organization' | 'users' | 'leads' =
-    rawTab === 'organization' ? 'organization' : rawTab === 'users' ? 'users' : rawTab === 'leads' ? 'leads' : 'licenses'
-  const [activeTab, setActiveTab] = useState<'licenses' | 'organization' | 'users' | 'leads'>(initialTab)
+  const initialTab: 'licenses' | 'organization' | 'users' | 'leads' | 'notes' | 'documents' =
+    rawTab === 'organization' ? 'organization'
+    : rawTab === 'users' ? 'users'
+    : rawTab === 'leads' ? 'leads'
+    : rawTab === 'notes' ? 'notes'
+    : rawTab === 'documents' ? 'documents'
+    : 'licenses'
+  const [activeTab, setActiveTab] = useState<'licenses' | 'organization' | 'users' | 'leads' | 'notes' | 'documents'>(initialTab)
   const [usersTabActivated, setUsersTabActivated] = useState(initialTab === 'users')
+  const [notesTabActivated, setNotesTabActivated] = useState(initialTab === 'notes')
+  const [documentsTabActivated, setDocumentsTabActivated] = useState(initialTab === 'documents')
+
+  const [docsPanel, setDocsPanel] = useState<{ leadId: string; leadName: string } | null>(null)
+  const [notesPanel, setNotesPanel] = useState<{ leadId: string; leadName: string } | null>(null)
+  const [docsCache, setDocsCache] = useState<Record<string, FetchedDocument[]>>({})
+  const [notesCache, setNotesCache] = useState<Record<string, FetchedNote[]>>({})
+  const [loadingDocs, setLoadingDocs] = useState(false)
+  const [loadingNotes, setLoadingNotes] = useState(false)
+
+  const openDocsPanel = async (leadId: string, leadName: string) => {
+    setDocsPanel({ leadId, leadName })
+    if (docsCache[leadId] !== undefined) return
+    setLoadingDocs(true)
+    const result = await fetchLeadDocumentsAction(leadId)
+    if (result.data) setDocsCache(prev => ({ ...prev, [leadId]: result.data as FetchedDocument[] }))
+    setLoadingDocs(false)
+  }
+
+  const openNotesPanel = async (leadId: string, leadName: string) => {
+    setNotesPanel({ leadId, leadName })
+    if (notesCache[leadId] !== undefined) return
+    setLoadingNotes(true)
+    const result = await fetchLeadNotesAction(leadId)
+    if (result.data) setNotesCache(prev => ({ ...prev, [leadId]: result.data as FetchedNote[] }))
+    setLoadingNotes(false)
+  }
+
+  const handleViewLeadDoc = async (fileUrl: string) => {
+    const supabase = createClient()
+    const url = await createSignedStorageUrl(supabase, STORAGE_BUCKET.LEAD, fileUrl)
+    if (url) window.open(url, '_blank')
+  }
+
+  const handleDownloadLeadDoc = async (fileUrl: string, fileName: string) => {
+    const supabase = createClient()
+    const url = await createSignedStorageUrl(supabase, STORAGE_BUCKET.LEAD, fileUrl)
+    if (!url) return
+    try {
+      const res = await fetch(url)
+      const blob = await res.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = fileName || 'document'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(blobUrl)
+    } catch {
+      window.open(url, '_blank')
+    }
+  }
+
+  const leadNameMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const l of agencyLeads) {
+      map[l.id] = [l.contact_first_name, l.contact_last_name].filter(Boolean).join(' ') || l.company_name || l.id
+    }
+    return map
+  }, [agencyLeads])
   const [activeSection, setActiveSection] = useState<AgencySection>('business')
   const [editingSection, setEditingSection] = useState<AgencySection | null>(null)
   const [isSaving, setIsSaving] = useState(false)
@@ -319,6 +413,39 @@ export default function AgencyDetailContent({
   const [isUploadingDoc, setIsUploadingDoc] = useState(false)
   const [uploadDocError, setUploadDocError] = useState<string | null>(null)
   const uploadFileRef = useRef<HTMLInputElement>(null)
+
+  // License table search + sort
+  const [licSearch, setLicSearch] = useState('')
+  const [licSortKey, setLicSortKey] = useState<'name' | 'state' | 'number' | 'activated' | 'expires' | 'status'>('name')
+  const [licSortDir, setLicSortDir] = useState<'asc' | 'desc'>('asc')
+  // Application table filter + sort
+  const [appSearch, setAppSearch] = useState('')
+  const [appStatusFilter, setAppStatusFilter] = useState('all')
+  const [appSortKey, setAppSortKey] = useState<'name' | 'state' | 'status' | 'progress' | 'started' | 'updated'>('started')
+  const [appSortDir, setAppSortDir] = useState<'asc' | 'desc'>('desc')
+  // Program table filter + sort
+  const [programSearch, setProgramSearch] = useState('')
+  const [programStatusFilter, setProgramStatusFilter] = useState('all')
+  const [programSortKey, setProgramSortKey] = useState<'name' | 'state' | 'status' | 'progress' | 'items'>('name')
+  const [programSortDir, setProgramSortDir] = useState<'asc' | 'desc'>('asc')
+
+  function makeHandleSort<K extends string>(
+    key: K,
+    currentKey: K,
+    setKey: (k: K) => void,
+    currentDir: 'asc' | 'desc',
+    setDir: (d: 'asc' | 'desc') => void
+  ) {
+    return () => {
+      if (currentKey === key) setDir(currentDir === 'asc' ? 'desc' : 'asc')
+      else { setKey(key); setDir('asc') }
+    }
+  }
+
+  function SortIcon({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) {
+    if (!active) return <ChevronsUpDown className="w-3 h-3 opacity-40" />
+    return dir === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
+  }
 
   const buildInitialForm = (): OrgFormState => ({
     companyName: agency.name,
@@ -424,13 +551,79 @@ export default function AgencyDetailContent({
   const expiringSoon = licenses.filter((l) => l.status === 'active' && isExpiringSoon(l.expiry_date))
   const expiredLicenses = licenses.filter((l) => l.status === 'expired')
 
-  const displayedLicenses = licenses.filter((l) => {
-    if (statusFilter === 'all') return true
-    if (statusFilter === 'active') return l.status === 'active' && !isExpiringSoon(l.expiry_date)
-    if (statusFilter === 'expiring') return l.status === 'active' && isExpiringSoon(l.expiry_date)
-    if (statusFilter === 'expired') return l.status === 'expired'
-    return true
-  })
+  const displayedLicenses = useMemo(() => {
+    const term = licSearch.trim().toLowerCase()
+    const list = licenses.filter((l) => {
+      if (statusFilter === 'active' && !(l.status === 'active' && !isExpiringSoon(l.expiry_date))) return false
+      if (statusFilter === 'expiring' && !(l.status === 'active' && isExpiringSoon(l.expiry_date))) return false
+      if (statusFilter === 'expired' && l.status !== 'expired') return false
+      if (term && !l.license_name.toLowerCase().includes(term) && !l.state.toLowerCase().includes(term) && !(l.license_number ?? '').toLowerCase().includes(term)) return false
+      return true
+    })
+    return list.sort((a, b) => {
+      let cmp = 0
+      if (licSortKey === 'name') cmp = a.license_name.localeCompare(b.license_name)
+      if (licSortKey === 'state') cmp = a.state.localeCompare(b.state)
+      if (licSortKey === 'number') cmp = (a.license_number ?? '').localeCompare(b.license_number ?? '')
+      if (licSortKey === 'activated') cmp = (a.activated_date ?? '').localeCompare(b.activated_date ?? '')
+      if (licSortKey === 'expires') cmp = (a.expiry_date ?? '').localeCompare(b.expiry_date ?? '')
+      if (licSortKey === 'status') cmp = a.status.localeCompare(b.status)
+      return licSortDir === 'asc' ? cmp : -cmp
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [licenses, statusFilter, licSearch, licSortKey, licSortDir])
+
+  // Applications: filter + sort
+  const displayedApplications = useMemo(() => {
+    const term = appSearch.trim().toLowerCase()
+    const list = applications.filter(a => {
+      if (appStatusFilter !== 'all' && a.status !== appStatusFilter) return false
+      if (term && !a.application_name.toLowerCase().includes(term) && !a.state.toLowerCase().includes(term)) return false
+      return true
+    })
+    return list.sort((a, b) => {
+      let cmp = 0
+      if (appSortKey === 'name') cmp = a.application_name.localeCompare(b.application_name)
+      if (appSortKey === 'state') cmp = a.state.localeCompare(b.state)
+      if (appSortKey === 'status') cmp = a.status.localeCompare(b.status)
+      if (appSortKey === 'progress') cmp = (a.progress_percentage ?? 0) - (b.progress_percentage ?? 0)
+      if (appSortKey === 'started') cmp = (a.started_date ?? '').localeCompare(b.started_date ?? '')
+      if (appSortKey === 'updated') cmp = (a.last_updated_date ?? '').localeCompare(b.last_updated_date ?? '')
+      return appSortDir === 'asc' ? cmp : -cmp
+    })
+  }, [applications, appSearch, appStatusFilter, appSortKey, appSortDir])
+
+  // Programs: filter + sort
+  const displayedPrograms = useMemo(() => {
+    const term = programSearch.trim().toLowerCase()
+    const list = programs.filter(p => {
+      if (programStatusFilter !== 'all' && p.status !== programStatusFilter) return false
+      if (term && !p.application_name.toLowerCase().includes(term) && !p.state.toLowerCase().includes(term)) return false
+      return true
+    })
+    return list.sort((a, b) => {
+      let cmp = 0
+      if (programSortKey === 'name') cmp = a.application_name.localeCompare(b.application_name)
+      if (programSortKey === 'state') cmp = a.state.localeCompare(b.state)
+      if (programSortKey === 'status') cmp = a.status.localeCompare(b.status)
+      if (programSortKey === 'progress') {
+        const pctOf = (p: typeof a) => {
+          const items = p.application_playbook_items ?? []
+          const na = items.filter(i => i.status === 'not_applicable').length
+          const countable = items.length - na
+          const approved = items.filter(i => i.status === 'approved').length
+          return countable > 0 ? Math.round((approved / countable) * 100) : 0
+        }
+        cmp = pctOf(a) - pctOf(b)
+      }
+      if (programSortKey === 'items') cmp = (a.application_playbook_items?.length ?? 0) - (b.application_playbook_items?.length ?? 0)
+      return programSortDir === 'asc' ? cmp : -cmp
+    })
+  }, [programs, programSearch, programStatusFilter, programSortKey, programSortDir])
+
+  // Unique statuses present in apps/programs for filter dropdowns
+  const appStatuses = useMemo(() => Array.from(new Set(applications.map(a => a.status))).sort(), [applications])
+  const programStatuses = useMemo(() => Array.from(new Set(programs.map(p => p.status))).sort(), [programs])
 
   const handleDownloadLicense = async (license: License) => {
     setDownloadingId(license.id)
@@ -595,6 +788,8 @@ export default function AgencyDetailContent({
             { key: 'leads', label: `Leads${agencyLeads.length > 0 ? ` (${agencyLeads.length})` : ''}` },
             { key: 'organization', label: 'Organization' },
             { key: 'users', label: 'Users' },
+            { key: 'notes', label: 'Notes' },
+            { key: 'documents', label: 'Documents' },
           ] as const).map(({ key: tab, label }) => (
             <button
               key={tab}
@@ -602,6 +797,8 @@ export default function AgencyDetailContent({
               onClick={() => {
                 setActiveTab(tab)
                 if (tab === 'users') setUsersTabActivated(true)
+                if (tab === 'notes') setNotesTabActivated(true)
+                if (tab === 'documents') setDocumentsTabActivated(true)
               }}
               className={`px-6 py-3 text-sm font-medium transition-colors ${
                 activeTab === tab
@@ -645,29 +842,39 @@ export default function AgencyDetailContent({
 
           {/* Client Licenses section */}
           <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-2">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 shrink-0">
                 <FileText className="w-5 h-5 text-blue-600" />
                 <h2 className="text-base font-semibold text-gray-900">Client Licenses</h2>
               </div>
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+                  <input
+                    type="search"
+                    value={licSearch}
+                    onChange={e => setLicSearch(e.target.value)}
+                    placeholder="Search…"
+                    className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-44"
+                  />
+                </div>
                 <div className="relative">
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
-                    className="appearance-none pl-3 pr-8 py-2 text-sm bg-white border border-gray-300 rounded-lg text-gray-700 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                    className="appearance-none pl-3 pr-7 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-700 focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
                   >
                     <option value="all">All Statuses</option>
                     <option value="active">Active</option>
                     <option value="expiring">Expiring Soon</option>
                     <option value="expired">Expired</option>
                   </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
                 </div>
                 <button
                   type="button"
                   onClick={() => setAddLicenseOpen(true)}
-                  className="inline-flex items-center gap-2 px-3 py-2 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 transition-colors"
+                  className="inline-flex items-center gap-2 px-3 py-1.5 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 transition-colors"
                 >
                   <Plus className="w-4 h-4" />
                   Add License
@@ -688,12 +895,24 @@ export default function AgencyDetailContent({
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">License</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">State</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">License #</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Activated</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Expires</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Status</th>
+                      {([
+                        ['name',      'License'],
+                        ['state',     'State'],
+                        ['number',    'License #'],
+                        ['activated', 'Activated'],
+                        ['expires',   'Expires'],
+                        ['status',    'Status'],
+                      ] as const).map(([key, label]) => (
+                        <th
+                          key={key}
+                          onClick={() => makeHandleSort(key, licSortKey, setLicSortKey, licSortDir, setLicSortDir)()}
+                          className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider cursor-pointer select-none hover:text-gray-900"
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            {label} <SortIcon active={licSortKey === key} dir={licSortDir} />
+                          </span>
+                        </th>
+                      ))}
                       <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
@@ -775,11 +994,34 @@ export default function AgencyDetailContent({
           {/* License Applications section */}
           <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <FileText className="w-5 h-5 text-blue-600" />
                 <h2 className="text-base font-semibold text-gray-900">License Applications</h2>
               </div>
-              <div className="w-auto">
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+                  <input
+                    type="search"
+                    value={appSearch}
+                    onChange={e => setAppSearch(e.target.value)}
+                    placeholder="Search…"
+                    className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-44"
+                  />
+                </div>
+                <div className="relative">
+                  <select
+                    value={appStatusFilter}
+                    onChange={e => setAppStatusFilter(e.target.value)}
+                    className="appearance-none pl-3 pr-7 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-700 focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
+                  >
+                    <option value="all">All Statuses</option>
+                    {appStatuses.map(s => (
+                      <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+                </div>
                 <ApplyForNewLicenseButton
                   agencyId={agency.id}
                   agencyName={agency.name}
@@ -792,22 +1034,36 @@ export default function AgencyDetailContent({
               <div className="px-6 py-10 text-center text-sm text-gray-500">
                 No license applications found for this agency.
               </div>
+            ) : displayedApplications.length === 0 ? (
+              <div className="px-6 py-10 text-center text-sm text-gray-500">No applications match the selected filters.</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Application Name</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">State</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Progress</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Started</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Updated</th>
+                      {([
+                        ['name',    'Application Name'],
+                        ['state',   'State'],
+                        ['status',  'Status'],
+                        ['progress','Progress'],
+                        ['started', 'Started'],
+                        ['updated', 'Last Updated'],
+                      ] as const).map(([key, label]) => (
+                        <th
+                          key={key}
+                          onClick={() => makeHandleSort(key, appSortKey, setAppSortKey, appSortDir, setAppSortDir)()}
+                          className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700"
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            {label} <SortIcon active={appSortKey === key} dir={appSortDir} />
+                          </span>
+                        </th>
+                      ))}
                       <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {applications.map((app) => {
+                    {displayedApplications.map((app) => {
                       const pct = app.progress_percentage ?? 0
                       const agencyDetailHref = `${backPath}/${agency.id}`
                       const appDetailPath = `${backPath.startsWith('/pages/admin') ? '/pages/admin/licenses' : '/pages/expert'}/applications/${app.id}?back=${encodeURIComponent(agencyDetailHref)}`
@@ -873,11 +1129,34 @@ export default function AgencyDetailContent({
           {/* Programs section */}
           <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-2">
-              <TrendingUp className="w-5 h-5 text-blue-600" />
-              <h2 className="text-base font-semibold text-gray-900">Programs</h2>
-            </div>
-            <div className="w-auto">
+              <div className="flex items-center gap-2 shrink-0">
+                <TrendingUp className="w-5 h-5 text-blue-600" />
+                <h2 className="text-base font-semibold text-gray-900">Programs</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+                  <input
+                    type="search"
+                    value={programSearch}
+                    onChange={e => setProgramSearch(e.target.value)}
+                    placeholder="Search…"
+                    className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-44"
+                  />
+                </div>
+                <div className="relative">
+                  <select
+                    value={programStatusFilter}
+                    onChange={e => setProgramStatusFilter(e.target.value)}
+                    className="appearance-none pl-3 pr-7 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-700 focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
+                  >
+                    <option value="all">All Statuses</option>
+                    {programStatuses.map(s => (
+                      <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+                </div>
                 <ApplyForNewLicenseButton
                   agencyId={agency.id}
                   agencyName={agency.name}
@@ -891,21 +1170,35 @@ export default function AgencyDetailContent({
               <div className="px-6 py-10 text-center text-sm text-gray-500">
                 No programs found for this agency.
               </div>
+            ) : displayedPrograms.length === 0 ? (
+              <div className="px-6 py-10 text-center text-sm text-gray-500">No programs match the selected filters.</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Program Name</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">State</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Progress</th>
-                      <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Items</th>
+                      {([
+                        ['name',     'Program Name'],
+                        ['state',    'State'],
+                        ['status',   'Status'],
+                        ['progress', 'Progress'],
+                        ['items',    'Items'],
+                      ] as const).map(([key, label]) => (
+                        <th
+                          key={key}
+                          onClick={() => makeHandleSort(key, programSortKey, setProgramSortKey, programSortDir, setProgramSortDir)()}
+                          className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700"
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            {label} <SortIcon active={programSortKey === key} dir={programSortDir} />
+                          </span>
+                        </th>
+                      ))}
                       <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {programs.map((program) => {
+                    {displayedPrograms.map((program) => {
                       const items = program.application_playbook_items ?? []
                       const na = items.filter(i => i.status === 'not_applicable').length
                       const countable = items.length - na
@@ -1333,81 +1626,68 @@ export default function AgencyDetailContent({
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
                       <th className="px-5 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Lead</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-28">Stage</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-36">Stage</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-40">Service Type</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-28">Price</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-28">Signed Date</th>
-                      <th className="px-4 py-3 w-10" />
+                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider w-28">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {agencyLeads.map(lead => (
-                      <tr key={lead.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-5 py-3">
-                          <p className="text-sm font-medium text-gray-900">{leadNameMap[lead.id]}</p>
-                          {lead.company_name && (
-                            <p className="text-xs text-gray-400 mt-0.5">{lead.company_name}</p>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${stageColorMap[lead.stage] ?? 'bg-gray-100 text-gray-600'}`}>
-                            {LEAD_STAGES.find(s => s.key === lead.stage)?.label ?? lead.stage}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-600">{lead.service_type ?? '—'}</td>
-                        <td className="px-4 py-3 text-sm text-gray-600">{lead.price != null ? fmtCurrency(lead.price) : '—'}</td>
-                        <td className="px-4 py-3 text-sm text-gray-600">
-                          {lead.signed_date ? new Date(lead.signed_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
-                        </td>
-                        <td className="px-4 py-3">
-                          <a href={`/pages/admin/leads/${lead.id}`} className="p-1.5 text-gray-400 hover:text-gray-700 rounded transition-colors inline-flex">
-                            <ExternalLink className="w-4 h-4" />
-                          </a>
-                        </td>
-                      </tr>
-                    ))}
+                  <tbody className="divide-y divide-gray-100">
+                    {agencyLeads.map(lead => {
+                      const name = leadNameMap[lead.id]
+                      return (
+                        <tr key={lead.id} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-5 py-3">
+                            <p className="text-sm font-medium text-gray-900">{name}</p>
+                            {lead.company_name && (
+                              <p className="text-xs text-gray-400 mt-0.5">{lead.company_name}</p>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${stageColorMap[lead.stage] ?? 'bg-gray-100 text-gray-600'}`}>
+                              {LEAD_STAGES.find(s => s.key === lead.stage)?.label ?? lead.stage}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{lead.service_type ?? '—'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{lead.price != null ? fmtCurrency(lead.price) : '—'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {lead.signed_date ? new Date(lead.signed_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                title="View documents"
+                                onClick={() => openDocsPanel(lead.id, name)}
+                                className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                              >
+                                <FileText className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                title="View notes"
+                                onClick={() => openNotesPanel(lead.id, name)}
+                                className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                              >
+                                <StickyNote className="w-4 h-4" />
+                              </button>
+                              <a
+                                href={`/pages/admin/leads/${lead.id}`}
+                                title="Open lead"
+                                className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors inline-flex"
+                              >
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               )}
             </div>
-
-            {/* Documents across all leads */}
-            {agencyLeadDocuments.length > 0 && (
-              <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-blue-600" />
-                  <h2 className="text-base font-semibold text-gray-900">Proposal Documents</h2>
-                </div>
-                <table className="w-full">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-5 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Document</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-32">Type</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-40">Lead</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-32">Date</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {agencyLeadDocuments.map(doc => (
-                      <tr key={doc.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-5 py-3">
-                          <div className="flex items-center gap-2">
-                            <FileText className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                            <span className="text-sm font-medium text-gray-900">{doc.document_name}</span>
-                          </div>
-                          {doc.file_name && <p className="text-xs text-gray-400 ml-6 mt-0.5">{doc.file_name}</p>}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-500">{doc.document_type ?? '—'}</td>
-                        <td className="px-4 py-3 text-sm text-gray-500">{leadNameMap[doc.lead_id] ?? '—'}</td>
-                        <td className="px-4 py-3 text-sm text-gray-500">
-                          {new Date(doc.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
         )
       })()}
@@ -1416,6 +1696,146 @@ export default function AgencyDetailContent({
       <div className={activeTab === 'users' ? '' : 'hidden'}>
         {usersTabActivated && <AgencyUsersTab agencyId={agency.id} />}
       </div>
+
+      {/* Notes tab */}
+      <div className={activeTab === 'notes' ? '' : 'hidden'}>
+        {notesTabActivated && (
+          <AgencyNotesTab
+            agencyId={agency.id}
+            leadIds={Object.keys(leadNameMap)}
+            leadNameMap={leadNameMap}
+          />
+        )}
+      </div>
+
+      {/* Documents tab */}
+      <div className={activeTab === 'documents' ? '' : 'hidden'}>
+        {documentsTabActivated && (
+          <AgencyDocumentsTab
+            agencyId={agency.id}
+            leadDocuments={agencyLeadDocuments}
+            leadNameMap={leadNameMap}
+          />
+        )}
+      </div>
+
+      {/* Lead Documents panel */}
+      {docsPanel && (
+        <Modal
+          isOpen={true}
+          onClose={() => setDocsPanel(null)}
+          title={`Documents — ${docsPanel.leadName}`}
+          size="lg"
+        >
+          <div className="p-6">
+            {loadingDocs && docsCache[docsPanel.leadId] === undefined ? (
+              <div className="flex items-center justify-center py-10 gap-2 text-gray-500">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span className="text-sm">Loading documents…</span>
+              </div>
+            ) : (docsCache[docsPanel.leadId] ?? []).length === 0 ? (
+              <div className="py-10 text-center text-gray-400">
+                <FileText className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                <p className="text-sm">No documents attached to this lead.</p>
+              </div>
+            ) : (
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="pb-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Document</th>
+                    <th className="pb-2 px-4 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-32">Type</th>
+                    <th className="pb-2 px-4 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-32">Date</th>
+                    <th className="pb-2 w-20 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {(docsCache[docsPanel.leadId] ?? []).map(doc => (
+                    <tr key={doc.id} className="hover:bg-gray-50 transition-colors">
+                      <td className="py-3">
+                        <div className="flex items-center gap-2">
+                          <FileText className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                          <span className="text-sm font-medium text-gray-900">{doc.document_name}</span>
+                        </div>
+                        {doc.file_name && <p className="text-xs text-gray-400 ml-6 mt-0.5">{doc.file_name}</p>}
+                      </td>
+                      <td className="py-3 px-4 text-sm text-gray-500">{doc.document_type ?? '—'}</td>
+                      <td className="py-3 px-4 text-sm text-gray-500 whitespace-nowrap">
+                        {new Date(doc.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </td>
+                      <td className="py-3">
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            title="View"
+                            onClick={() => handleViewLeadDoc(doc.file_url)}
+                            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            title="Download"
+                            onClick={() => handleDownloadLeadDoc(doc.file_url, doc.file_name ?? doc.document_name)}
+                            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          >
+                            <Download className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Lead Notes panel */}
+      {notesPanel && (
+        <Modal
+          isOpen={true}
+          onClose={() => setNotesPanel(null)}
+          title={`Notes — ${notesPanel.leadName}`}
+          size="lg"
+        >
+          <div className="p-6">
+            {loadingNotes && notesCache[notesPanel.leadId] === undefined ? (
+              <div className="flex items-center justify-center py-10 gap-2 text-gray-500">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span className="text-sm">Loading notes…</span>
+              </div>
+            ) : (notesCache[notesPanel.leadId] ?? []).length === 0 ? (
+              <div className="py-10 text-center text-gray-400">
+                <MessageSquare className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                <p className="text-sm">No notes on this lead.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {(notesCache[notesPanel.leadId] ?? []).map(note => {
+                  const author = Array.isArray(note.author) ? note.author[0] : note.author
+                  return (
+                    <div key={note.id} className="border border-gray-100 rounded-xl p-4 bg-gray-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium text-gray-700">{author?.full_name ?? 'Unknown'}</span>
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-200 text-gray-600 capitalize">
+                            {note.note_type.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        <span className="text-xs text-gray-400">
+                          {new Date(note.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-800 whitespace-pre-wrap">{note.content}</p>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {/* Modals — always mounted regardless of active tab */}
       {editingLicense && (

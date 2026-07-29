@@ -43,7 +43,11 @@ export async function getLeads(
       contact_address2,
       contact_city,
       contact_state,
-      contact_zip
+      contact_zip,
+      lead_owner_id,
+      proposal_sent_date,
+      service_states,
+      lead_owner:user_profiles!leads_lead_owner_id_fkey(id, full_name)
     `)
     .eq('lead_type', opts.leadType)
     .order('created_at', { ascending: false })
@@ -105,6 +109,10 @@ export async function getLeadById(supabase: SupabaseClient, leadId: string) {
       contact_city,
       contact_state,
       contact_zip,
+      lead_owner_id,
+      proposal_sent_date,
+      service_states,
+      lead_owner:user_profiles!leads_lead_owner_id_fkey(id, full_name),
       converted_agency:agencies!leads_converted_agency_id_fkey(id, name)
     `)
     .eq('id', leadId)
@@ -198,6 +206,20 @@ export async function getLeadDocumentsByLeadIds(supabase: SupabaseClient, leadId
     .order('created_at', { ascending: false })
 }
 
+export async function getLeadTaskStatusByLeadIds(
+  supabase: SupabaseClient,
+  leadIds: string[],
+  today: string
+) {
+  if (leadIds.length === 0) return { data: [], error: null }
+  return supabase
+    .from('lead_tasks')
+    .select('lead_id, due_date')
+    .in('lead_id', leadIds)
+    .is('completed_at', null)
+    .lte('due_date', today)
+}
+
 export async function linkLeadToExistingAgency(supabase: SupabaseClient, leadId: string, agencyId: string) {
   return supabase
     .from('leads')
@@ -210,4 +232,21 @@ export async function unlinkLeadFromAgency(supabase: SupabaseClient, leadId: str
     .from('leads')
     .update({ converted_agency_id: null, updated_at: new Date().toISOString() })
     .eq('id', leadId)
+}
+
+export async function getLeadNotesByLeadIds(supabase: SupabaseClient, leadIds: string[]) {
+  if (leadIds.length === 0) return { data: [], error: null }
+  return supabase
+    .from('lead_notes')
+    .select(`
+      id,
+      lead_id,
+      author_id,
+      content,
+      note_type,
+      created_at,
+      author:user_profiles!lead_notes_author_id_fkey(full_name)
+    `)
+    .in('lead_id', leadIds)
+    .order('created_at', { ascending: false })
 }
