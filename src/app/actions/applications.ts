@@ -5,7 +5,15 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { revalidatePath } from 'next/cache'
 import { getSession } from '@/lib/auth'
 import * as q from '@/lib/supabase/query'
-import { getApplicationForClose, closeApplicationUpdate, updateApplicationStatus } from '@/lib/supabase/query'
+import {
+  getApplicationForClose,
+  closeApplicationUpdate,
+  updateApplicationStatus,
+  closeApplicationManualUpdate,
+  completeApplicationManualUpdate,
+  reopenApplicationUpdate,
+  getApplicationAgencyAndStatus,
+} from '@/lib/supabase/query'
 import { applyPlaybookToApplication } from './playbooks'
 
 /**
@@ -240,6 +248,63 @@ export async function acceptApplicationRequest(applicationId: string): Promise<{
 
   revalidatePath('/pages/admin/licenses', 'page')
   revalidatePath('/pages/admin/licenses/applications/[id]', 'page')
+  revalidatePath('/pages/admin/programs', 'page')
+  revalidatePath('/pages/admin/programs/[applicationId]', 'page')
+  revalidatePath('/pages/agency/programs', 'page')
+  return { error: null }
+}
+
+/**
+ * Admin action to reject a pending program request.
+ * Moves status to 'rejected' and notifies the agency.
+ */
+export async function rejectProgramRequest(applicationId: string): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  if (session.profile?.role !== 'admin') return { error: 'Forbidden' }
+
+  const supabase = await createClient()
+  const today = new Date().toISOString().split('T')[0]
+
+  const { data: app, error: fetchErr } = await q.getApplicationById(supabase, applicationId)
+  if (fetchErr || !app) return { error: 'Application not found' }
+
+  const { error: updateErr } = await q.updateApplicationById(supabase, applicationId, {
+    status: 'rejected',
+    last_updated_date: today,
+  })
+  if (updateErr) return { error: updateErr.message }
+
+  const appRow = app as unknown as { application_name: string; company_owner_id: string | null; agency_id: string | null }
+
+  const adminClient = createAdminClient()
+  const notifPayload = {
+    title: 'Program Request Declined',
+    message: `Your "${appRow.application_name}" program request was not approved at this time. Please contact us if you have questions.`,
+    type: 'application_update',
+    icon_type: 'exclamation',
+    action_url: '/pages/agency/programs',
+  }
+
+  if (appRow.agency_id) {
+    const { data: admins } = await adminClient
+      .from('agency_admins')
+      .select('user_id')
+      .eq('agency_id', appRow.agency_id)
+    if (admins && admins.length > 0) {
+      await adminClient.from('notifications').insert(
+        admins.map(a => ({ ...notifPayload, user_id: a.user_id }))
+      )
+    }
+  } else if (appRow.company_owner_id) {
+    await adminClient.from('notifications').insert({
+      ...notifPayload,
+      user_id: appRow.company_owner_id,
+    })
+  }
+
+  revalidatePath('/pages/admin/programs', 'page')
+  revalidatePath('/pages/admin/programs/[applicationId]', 'page')
   revalidatePath('/pages/agency/programs', 'page')
   return { error: null }
 }
@@ -278,12 +343,151 @@ export async function createProgramForAgency(
 
   if (insertError || !application) return { error: insertError?.message ?? 'Insert failed', data: null }
 
+  // Copy category/subcategory from the selected playbook
+  const { data: playbook } = await q.getPlaybookById(supabaseAdmin, data.playbook_id)
+  if (playbook?.category_id) {
+    await supabaseAdmin.from('applications').update({
+      category_id: playbook.category_id,
+      subcategory_id: (playbook as { subcategory_id?: string | null }).subcategory_id ?? null,
+    }).eq('id', application.id)
+  }
+
   await applyPlaybookToApplication(application.id)
 
   revalidatePath('/pages/admin/agencies/[id]', 'page')
   revalidatePath('/pages/expert/agencies/[id]', 'page')
   revalidatePath('/pages/admin/programs', 'page')
   return { error: null, data: { id: application.id } }
+}
+
+function revalidateApplicationPages(applicationId: string) {
+  revalidatePath('/pages/admin/licenses/applications/[id]', 'page')
+  revalidatePath('/pages/admin/programs', 'page')
+  revalidatePath(`/pages/admin/programs/${applicationId}`)
+  revalidatePath(`/pages/expert/programs/${applicationId}`)
+  revalidatePath(`/pages/agency/programs/${applicationId}`)
+}
+
+async function insertApplicationStatusNote(
+  applicationId: string,
+  agencyId: string,
+  userId: string,
+  content: string
+) {
+  const supabaseAdmin = createAdminClient()
+  const { error } = await supabaseAdmin.from('internal_notes').insert({
+    agency_id: agencyId,
+    subject_type: 'application',
+    subject_id: applicationId,
+    content,
+    created_by: userId,
+  })
+  if (error) console.error('[applications] Failed to insert status note:', error.message)
+}
+
+/** Manually close an application regardless of task completion. Admin/expert only. */
+export async function closeApplicationManually(
+  applicationId: string,
+  reason: string
+): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  const role = session.profile?.role
+  if (role !== 'admin' && role !== 'expert') return { error: 'Forbidden' }
+
+  const trimmedReason = reason.trim()
+  if (!trimmedReason) return { error: 'Reason is required' }
+
+  const supabase = await createClient()
+  const { data: app, error: fetchErr } = await getApplicationAgencyAndStatus(supabase, applicationId)
+  if (fetchErr || !app) return { error: 'Application not found' }
+  if (!app.agency_id) return { error: 'Application has no agency' }
+  if (app.status === 'approved' || app.status === 'rejected') {
+    return { error: 'Cannot close an approved or rejected application' }
+  }
+
+  const { error } = await closeApplicationManualUpdate(supabase, applicationId, app.agency_id, session.user.id, trimmedReason)
+  if (error) return { error: error.message }
+
+  await insertApplicationStatusNote(
+    applicationId,
+    app.agency_id,
+    session.user.id,
+    `Application manually closed. Reason: ${trimmedReason}`
+  )
+
+  revalidateApplicationPages(applicationId)
+  return { error: null }
+}
+
+/** Manually mark an application complete regardless of task completion. Admin/expert only. */
+export async function completeApplicationManually(
+  applicationId: string,
+  reason: string
+): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  const role = session.profile?.role
+  if (role !== 'admin' && role !== 'expert') return { error: 'Forbidden' }
+
+  const trimmedReason = reason.trim()
+  if (!trimmedReason) return { error: 'Notes are required' }
+
+  const supabase = await createClient()
+  const { data: app, error: fetchErr } = await getApplicationAgencyAndStatus(supabase, applicationId)
+  if (fetchErr || !app) return { error: 'Application not found' }
+  if (!app.agency_id) return { error: 'Application has no agency' }
+  if (app.status === 'approved' || app.status === 'rejected') {
+    return { error: 'Cannot mark an approved or rejected application complete' }
+  }
+
+  const { error } = await completeApplicationManualUpdate(supabase, applicationId, app.agency_id, session.user.id, trimmedReason)
+  if (error) return { error: error.message }
+
+  await insertApplicationStatusNote(
+    applicationId,
+    app.agency_id,
+    session.user.id,
+    `Application marked complete. Notes: ${trimmedReason}`
+  )
+
+  revalidateApplicationPages(applicationId)
+  return { error: null }
+}
+
+/** Re-open a closed or complete application back to in_progress. Admin/expert only. */
+export async function reopenApplication(
+  applicationId: string,
+  reason: string
+): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  const role = session.profile?.role
+  if (role !== 'admin' && role !== 'expert') return { error: 'Forbidden' }
+
+  const trimmedReason = reason.trim()
+  if (!trimmedReason) return { error: 'Reason is required' }
+
+  const supabase = await createClient()
+  const { data: app, error: fetchErr } = await getApplicationAgencyAndStatus(supabase, applicationId)
+  if (fetchErr || !app) return { error: 'Application not found' }
+  if (!app.agency_id) return { error: 'Application has no agency' }
+  if (app.status !== 'closed' && app.status !== 'complete') {
+    return { error: 'Application is not closed or complete' }
+  }
+
+  const { error } = await reopenApplicationUpdate(supabase, applicationId, app.agency_id)
+  if (error) return { error: error.message }
+
+  await insertApplicationStatusNote(
+    applicationId,
+    app.agency_id,
+    session.user.id,
+    `Application re-opened. Reason: ${trimmedReason}`
+  )
+
+  revalidateApplicationPages(applicationId)
+  return { error: null }
 }
 
 /** Rename a program (application_name). Admin and expert only. */
@@ -306,5 +510,110 @@ export async function renameApplication(
   revalidatePath('/pages/admin/programs', 'page')
   revalidatePath('/pages/admin/programs/[applicationId]', 'page')
   revalidatePath('/pages/expert/clients', 'page')
+  return { error: null }
+}
+
+/**
+ * Agency owner/coordinator action to submit a program request.
+ * Inserts the application with status='requested', then patches the
+ * admin notifications created by the DB trigger to include the correct
+ * action_url so the notification click routes to the Programs queue.
+ */
+export async function submitProgramRequest(data: {
+  application_name: string
+  state: string
+  playbook_id: string
+}): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  const role = session.profile?.role
+  if (role !== 'company_owner' && role !== 'care_coordinator') return { error: 'Forbidden' }
+
+  const supabase = await createClient()
+
+  const { data: profile } = await supabase
+    .from('user_profiles')
+    .select('agency_id')
+    .eq('id', session.user.id)
+    .single()
+
+  if (!profile?.agency_id) return { error: 'Could not determine your agency. Please contact support.' }
+
+  const todayStr = new Date().toISOString().split('T')[0]
+
+  // Insert via user client (RLS-respecting); DB trigger fires here and sends
+  // admin notifications without action_url.
+  const { error: insertError } = await q.insertApplication(supabase, {
+    agency_id: profile.agency_id,
+    company_owner_id: null,
+    application_name: data.application_name,
+    state: data.state,
+    license_type_id: null,
+    playbook_id: data.playbook_id,
+    status: 'requested',
+    progress_percentage: 0,
+    started_date: todayStr,
+    last_updated_date: todayStr,
+    submitted_date: todayStr,
+  })
+
+  if (insertError) return { error: insertError.message }
+
+  // Patch the notifications just created by the DB trigger so clicking them
+  // routes the admin to the Programs page instead of Licenses.
+  const adminClient = createAdminClient()
+  const cutoff = new Date(Date.now() - 15000).toISOString()
+
+  const { data: admins } = await adminClient
+    .from('user_profiles')
+    .select('id')
+    .eq('role', 'admin')
+
+  if (admins && admins.length > 0) {
+    await adminClient
+      .from('notifications')
+      .update({ action_url: '/pages/admin/programs' })
+      .in('user_id', admins.map((a: { id: string }) => a.id))
+      .is('action_url', null)
+      .gte('created_at', cutoff)
+  }
+
+  revalidatePath('/pages/agency/programs')
+  return { error: null }
+}
+
+/**
+ * Agency owner/coordinator action to cancel a pending program request.
+ * Only works while the request is still in 'requested' status.
+ */
+export async function cancelProgramRequest(applicationId: string): Promise<{ error: string | null }> {
+  const session = await getSession()
+  if (!session) return { error: 'Not authenticated' }
+  const role = session.profile?.role
+  if (role !== 'company_owner' && role !== 'care_coordinator') return { error: 'Forbidden' }
+
+  // Verify via RLS client that this request belongs to the user's agency and is cancellable
+  const supabase = await createClient()
+  const { data: app, error: fetchError } = await supabase
+    .from('applications')
+    .select('id, status')
+    .eq('id', applicationId)
+    .single()
+
+  if (fetchError || !app) return { error: 'Request not found' }
+  if (app.status !== 'requested') return { error: 'This request can no longer be cancelled' }
+
+  // Delete via admin client (agency users lack DELETE on applications)
+  const adminClient = createAdminClient()
+  const { error } = await adminClient
+    .from('applications')
+    .delete()
+    .eq('id', applicationId)
+    .eq('status', 'requested')
+
+  if (error) return { error: error.message }
+
+  revalidatePath('/pages/agency/programs')
+  revalidatePath('/pages/admin/programs')
   return { error: null }
 }

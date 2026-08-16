@@ -312,7 +312,7 @@ export async function convertLeadToAgency(leadId: string, agencyNameOverride?: s
 
   const { data: lead, error: fetchErr } = await supabase
     .from('leads')
-    .select('id, lead_type, stage, converted_agency_id, converted_at, company_name')
+    .select('id, lead_type, stage, converted_agency_id, converted_at, company_name, contact_first_name, contact_last_name, contact_phone, contact_email')
     .eq('id', leadId)
     .single()
 
@@ -331,6 +331,10 @@ export async function convertLeadToAgency(leadId: string, agencyNameOverride?: s
       onboarding_status: 'shell',
       status: 'active',
       state_specific_data: {},
+      primary_contact_first_name: lead.contact_first_name || null,
+      primary_contact_last_name: lead.contact_last_name || null,
+      phone_number: lead.contact_phone || null,
+      email: lead.contact_email || null,
       updated_at: new Date().toISOString(),
     })
     .select('id')
@@ -407,7 +411,8 @@ export async function uploadLeadDocument(
   })
 
   if (insertErr) {
-    await supabase.storage.from(STORAGE_BUCKET.LEAD).remove([filePath])
+    const { error: cleanupErr } = await supabase.storage.from(STORAGE_BUCKET.LEAD).remove([filePath])
+    if (cleanupErr) console.error('[leads/uploadLeadDocument] Storage cleanup failed. path=%s err=%s', filePath, cleanupErr.message)
     return { error: insertErr.message }
   }
 
@@ -420,7 +425,8 @@ export async function deleteLeadDocumentAction(leadId: string, docId: string, fi
   if (authErr) return { error: authErr }
 
   const supabase = await createClient()
-  await supabase.storage.from(STORAGE_BUCKET.LEAD).remove([filePath])
+  const { error: storageErr } = await supabase.storage.from(STORAGE_BUCKET.LEAD).remove([filePath])
+  if (storageErr) console.error('[leads/deleteLeadDocument] Storage delete failed. path=%s err=%s', filePath, storageErr.message)
   const { error } = await q.deleteLeadDocument(supabase, docId)
   if (error) return { error: error.message }
   revalidateLeadDetail(leadId)

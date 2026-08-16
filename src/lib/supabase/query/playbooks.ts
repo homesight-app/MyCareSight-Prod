@@ -383,6 +383,61 @@ export async function getApplicationsWithProgramsByAgencyId(supabase: Supabase, 
     .order('created_at', { ascending: false })
 }
 
+export interface GetApplicationsWithProgramsPaginatedOpts {
+  page?: number
+  pageSize?: number
+  search?: string
+}
+
+/** Paginated list of applications that have at least one playbook item (RLS-filtered). */
+export async function getApplicationsWithProgramsPaginated(
+  supabase: Supabase,
+  opts?: GetApplicationsWithProgramsPaginatedOpts
+) {
+  const page     = opts?.page     ?? 0
+  const pageSize = opts?.pageSize ?? 50
+  const from     = page * pageSize
+  const to       = from + pageSize - 1
+
+  let dataQuery = supabase
+    .from('applications')
+    .select(`
+      id, application_name, state, status, agency_id, assigned_expert_id,
+      agencies(id, name),
+      application_playbook_items!inner(status, requirement_type)
+    `)
+    .order('created_at', { ascending: false })
+    .range(from, to)
+
+  let countQuery = supabase
+    .from('applications')
+    .select('id', { count: 'exact', head: true })
+    .not('playbook_id', 'is', null)
+
+  if (opts?.search?.trim()) {
+    const term = `%${opts.search.trim()}%`
+    dataQuery  = dataQuery.ilike('application_name', term)
+    countQuery = countQuery.ilike('application_name', term)
+  }
+
+  const [dataResult, countResult] = await Promise.all([dataQuery, countQuery])
+  return {
+    data:  dataResult.data  ?? [],
+    count: countResult.count ?? 0,
+    error: dataResult.error ?? countResult.error,
+  }
+}
+
+/** Pending (status='requested') program requests for the current agency user (RLS-filtered). */
+export async function getRequestedProgramsForAgency(supabase: Supabase) {
+  return supabase
+    .from('applications')
+    .select('id, application_name, state, status, created_at, playbook_id, playbooks(name)')
+    .eq('status', 'requested')
+    .not('playbook_id', 'is', null)
+    .order('created_at', { ascending: false })
+}
+
 // ─── Rule check management ────────────────────────────────────────────────────
 
 export async function insertApplicationRuleCheck(
@@ -497,8 +552,11 @@ export async function getAllPlaybooks(supabase: Supabase) {
     .select(`
       id, name, playbook_type, description, is_active,
       state, cost_display, processing_time_display, renewal_period_display, icon_type,
+      category_id, subcategory_id,
       created_at,
       license_requirement:license_requirement_id(id, state, license_type),
+      category:configuration_values!category_id(id, name),
+      subcategory:configuration_values!subcategory_id(id, name),
       playbook_items(count)
     `)
     .order('created_at', { ascending: false })
@@ -514,7 +572,10 @@ export async function getPlaybookById(supabase: Supabase, playbookId: string) {
       processing_time_min, processing_time_max, processing_time_display,
       renewal_period_years, renewal_period_display,
       icon_type, requirements, created_by, created_at, updated_at,
-      license_requirement:license_requirement_id(id, state, license_type)
+      category_id, subcategory_id,
+      license_requirement:license_requirement_id(id, state, license_type),
+      category:configuration_values!category_id(id, name),
+      subcategory:configuration_values!subcategory_id(id, name)
     `)
     .eq('id', playbookId)
     .single()
@@ -549,6 +610,8 @@ export async function insertPlaybookRecord(
     requirements?: string[] | null
     is_active?: boolean
     created_by?: string | null
+    category_id?: string | null
+    subcategory_id?: string | null
   }
 ) {
   return supabase
@@ -580,6 +643,8 @@ export async function updatePlaybookRecord(
     icon_type?: string | null
     requirements?: string[] | null
     is_active?: boolean
+    category_id?: string | null
+    subcategory_id?: string | null
   }
 ) {
   return supabase
@@ -644,12 +709,24 @@ export interface StandalonePlaybook {
   icon_type: string | null
   requirements: string[] | null
   is_active: boolean
+  category_id: string | null
+  subcategory_id: string | null
+  category: { id: string; name: string } | null
+  subcategory: { id: string; name: string } | null
 }
 
 export async function getStandalonePlaybooksByState(supabase: Supabase, state: string) {
   const result = await supabase
     .from('playbooks')
-    .select('id, name, playbook_type, description, state, cost_display, service_fee_display, processing_time_display, renewal_period_display, icon_type, requirements, is_active, license_requirement:license_requirement_id(state)')
+    .select(`
+      id, name, playbook_type, description, state,
+      cost_display, service_fee_display, processing_time_display, renewal_period_display,
+      icon_type, requirements, is_active,
+      category_id, subcategory_id,
+      license_requirement:license_requirement_id(state),
+      category:configuration_values!category_id(id, name),
+      subcategory:configuration_values!subcategory_id(id, name)
+    `)
     .eq('is_active', true)
     .order('name')
 

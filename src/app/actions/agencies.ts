@@ -46,6 +46,8 @@ const agencyFormSchema = z.object({
   phoneNumber: z.string().optional(),
   agencyEmail: z.string().optional(),
   regionServiceArea: z.string().optional(),
+  primaryContactFirstName: z.string().optional(),
+  primaryContactLastName: z.string().optional(),
   isOnCall: z.boolean().optional(),
   previouslyLicensed: z.boolean().optional(),
   prevLicenseClosedDate: z.string().optional(),
@@ -88,6 +90,8 @@ function buildAgencyPayload(data: Omit<AgencyFormData, 'agencyAdminIds'>) {
     phone_number: data.phoneNumber?.trim() || null,
     email: data.agencyEmail?.trim() || null,
     region_service_area: data.regionServiceArea?.trim() || null,
+    primary_contact_first_name: data.primaryContactFirstName?.trim() || null,
+    primary_contact_last_name: data.primaryContactLastName?.trim() || null,
     is_on_call: data.isOnCall ?? null,
     previously_licensed: data.previouslyLicensed ?? null,
     prev_license_closed_date: data.prevLicenseClosedDate || null,
@@ -487,7 +491,8 @@ export async function uploadAgencyDocument(
   })
 
   if (insertErr) {
-    await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+    const { error: cleanupErr } = await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+    if (cleanupErr) console.error('[agencies/uploadAgencyDocument] Storage cleanup failed. path=%s err=%s', filePath, cleanupErr.message)
     return { error: insertErr.message }
   }
 
@@ -497,7 +502,8 @@ export async function uploadAgencyDocument(
 
 export async function deleteAgencyDocumentAction(agencyId: string, docId: string, filePath: string) {
   const supabase = await createClient()
-  await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+  const { error: storageErr } = await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+  if (storageErr) console.error('[agencies/deleteAgencyDocument] Storage delete failed. path=%s err=%s', filePath, storageErr.message)
   const { error } = await q.deleteAgencyDocument(supabase, docId)
   if (error) return { error: error.message }
   revalidateAgencyDetailPages()

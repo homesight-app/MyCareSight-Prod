@@ -1,14 +1,13 @@
+import { redirect } from 'next/navigation'
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import AdminLicensesContent from '@/components/AdminLicensesContent'
 
 export default async function AdminLicensesPage() {
-  const { user, profile } = await requireAdmin()
+  await requireAdmin()
+  redirect('/pages/admin')
   const supabase = await createClient()
-
-  const { count: unreadNotifications } = await q.getUnreadNotificationsCount(supabase, user.id)
 
   const [
     { data: requestedApplicationsData, error: requestedError },
@@ -101,17 +100,11 @@ export default async function AdminLicensesPage() {
   }
 
   return (
-    <AdminLayout 
-      user={{ id: user.id, email: user.email }} 
-      profile={profile} 
-      unreadNotifications={unreadNotifications || 0}
-    >
       <AdminLicensesContent
         requestedApplications={requestedApplications || []}
         allApplications={allApplications || []}
         experts={experts || []}
         playbookSet={playbookSet}
       />
-    </AdminLayout>
   )
 }

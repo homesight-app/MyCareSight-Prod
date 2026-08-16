@@ -17,6 +17,26 @@ The goal is a feature that is scalable, modern, and easy for end users — not j
 
 ---
 
+## Reuse existing components and flows — search before building
+
+Before implementing any modal, multi-step flow, button, or UI pattern, **search the codebase first** to check whether an equivalent already exists. If one does, reuse or extend it rather than building a parallel implementation.
+
+```bash
+# Example searches before building a "request program" flow:
+grep -r "Request Program\|requestProgram\|program.*request" src/components/
+grep -r "Modal\|modal" src/components/ | grep -i "license\|program\|apply"
+```
+
+Key reusable flows in this codebase:
+- **Apply for / Request a Program** → `ApplyForNewLicenseButton` (`src/components/ApplyForNewLicenseButton.tsx`) — accepts `programsOnly` prop to show only playbooks, and `agencyId` to skip the request step (admin/expert direct-create). Orchestrates `NewLicenseApplicationModal` → `SelectLicenseTypeModal` → `ReviewPlaybookRequestModal`.
+- **Create License Modal** → `CreateLicenseModal` (`src/components/CreateLicenseModal.tsx`)
+
+**Never duplicate a flow because a page needs a slightly different entry point.** Instead, reuse the existing component with its existing props, or add a new prop to the existing component to handle the variation.
+
+This rule is critical for maintainability: one change to a shared flow (copy, validation, API call) propagates everywhere instead of needing N fixes across N copies.
+
+---
+
 ## Commands
 
 ```bash
@@ -43,7 +63,7 @@ npm run lint && npm run typecheck && npm run build
 - `list_tables` — list all tables in a schema
 - `execute_sql` — query `information_schema.columns` for exact column names, types, and nullability
 
-**If the MCP connection fails or the tools are unavailable, stop and tell the user immediately.** Do not fall back to migration files as a substitute for live schema. Any column reference written without live DB verification risks silent data loss (wrong column name = RLS-silent no-op update) or NOT NULL insert failures.
+**If the MCP connection fails or the tools are unavailable at any point — whether at the start of a task or mid-way through — stop immediately and tell the user.** Do not silently fall back to migration files or any other offline source. Wait for the user to decide whether to proceed using migration files as a substitute. Any column reference written without live DB verification risks silent data loss (wrong column name = RLS-silent no-op update) or NOT NULL insert failures.
 
 This rule applies to:
 - Writing or reviewing `select()` column lists
@@ -149,6 +169,93 @@ Runs on every request except `_next/static`, `_next/image`, and `favicon`. Calls
 ### Forms
 
 Use **React Hook Form** + **Zod** for all forms. Schemas live co-located with the component or in the component file itself. Server validation is always the source of truth; client-side Zod is UX only.
+
+### Phone and email fields — always use the shared components and schemas
+
+**Never** use a plain `<input type="tel">` or `<input type="email">` directly for user-facing phone or email capture. Always use the shared components in `src/components/ui/`:
+
+| Component | File | Use for |
+|-----------|------|---------|
+| `PhoneInput` | `src/components/ui/PhoneInput.tsx` | Every phone/fax number field |
+| `EmailInput` | `src/components/ui/EmailInput.tsx` | Every email address field |
+
+`PhoneInput` auto-formats to `(XXX) XXX-XXXX` as the user types, renders `type="tel"` and a standard placeholder, and displays an inline `error` prop below the field. `EmailInput` does the same for email with `type="email"`.
+
+**RHF forms** — use `mode: 'onBlur'` on `useForm` so validation fires on blur, then spread `register` directly into the component:
+
+```tsx
+import PhoneInput from '@/components/ui/PhoneInput'
+import EmailInput from '@/components/ui/EmailInput'
+
+const { register, formState: { errors } } = useForm({ mode: 'onBlur', resolver: zodResolver(schema) })
+
+<PhoneInput {...register('phone')} error={errors.phone?.message} className="..." />
+<EmailInput {...register('email')} error={errors.email?.message} className="..." />
+```
+
+**Plain state forms** — pass `value` and `onChange` (event handler); `e.target.value` is already formatted:
+
+```tsx
+<PhoneInput
+  value={form.phone}
+  onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
+  error={fieldErrors.phone}
+  className="..."
+/>
+```
+
+**Zod schemas** — use the pre-built field schemas from `src/lib/validation.ts` instead of re-writing the regex refine:
+
+```ts
+import { phoneZodField, emailZodField, optionalEmailZodField } from '@/lib/validation'
+
+const schema = z.object({
+  phone: phoneZodField,           // optional, validates format if non-empty
+  email: emailZodField,           // required valid email
+  alt_email: optionalEmailZodField, // optional, validates format if non-empty
+})
+```
+
+**Server-side / submit-time validation** for plain state forms — use `isValidUSPhone` and `isValidEmail` from `src/lib/validation.ts` as a final guard before calling server actions.
+
+### Configurable dropdown values (`configuration_values`)
+
+Admin-manageable dropdown and cascading-dropdown data lives in two tables:
+
+| Table | Role |
+|-------|------|
+| `configuration_types` | One row per list type (e.g. `PLAYBOOK_CATEGORY`, `CANCELLATION_REASON`) |
+| `configuration_values` | All values; `parent_id` enables cascading (parent=NULL for top-level) |
+
+**When to use this vs. hard-coded constants:**
+- Use `configuration_values` for display/reference data that no application logic branches on (category labels, reasons, contact types)
+- Use TypeScript constants / DB enums for status values, icon types, or any value that triggers code behavior (e.g. `status === 'requested'`, `icon_type: 'heart'`)
+
+**Adding a new configurable dropdown (no new tables needed):**
+1. INSERT a row into `configuration_types` with a unique `code` (e.g. `CANCELLATION_REASON`)
+2. Seed initial values in `configuration_values` with `type_id` from that row
+3. Add a `<ConfigurableListSection typeCode="CANCELLATION_REASON" ... />` in `ConfigurationContent.tsx`
+4. Fetch in the page server component: `getConfigurationValues('CANCELLATION_REASON')` from `@/app/actions/configuration-values`
+
+**Consumer pattern:**
+Pages fetch values via `getConfigurationValues(typeCode)` (server action, cached with `CACHE_TAG_CONFIGURATION_VALUES`). Components receive data as `{ id, name, subcategories: { id, name }[] }[]`. The same shape works for simple lists (empty subcategories) and cascading dropdowns.
+
+**Hierarchy:**
+- `supports_hierarchy = true` on the type → values may have a non-null `parent_id`
+- Top-level (parent_id = NULL) = Category; child values = Subcategories
+- `ConfigurableListSection` component handles both automatically
+
+**When application logic references a specific value:**
+Set `code = 'STABLE_KEY'` on that value and look up by code, not by display name. This lets admins rename display names freely without breaking logic.
+
+**Phase 2 migration candidates** (not yet migrated — each needs a new migration + column change):
+
+| Field | Current state | Note |
+|-------|--------------|-------|
+| Lead Source | `leads.source TEXT`, hard-coded array in `AddLeadModal.tsx` | Route checks `source === 'Website'` — must switch to code lookup |
+| Certification Types | Separate table managed in `SystemListsManagement` | Simple flat list |
+| Staff Roles | Separate table managed in `SystemListsManagement` | Simple flat list |
+| Skilled Task Categories | Separate table | Possibly hierarchical |
 
 ---
 

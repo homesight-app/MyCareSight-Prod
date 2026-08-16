@@ -4,7 +4,6 @@ import { ArrowLeft } from 'lucide-react'
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import ExpertProgramView from '@/components/ExpertProgramView'
 import type { ApplicationPlaybookItem } from '@/lib/supabase/query/playbooks'
 
@@ -13,12 +12,11 @@ export default async function AdminProgramDetailPage({
 }: {
   params: Promise<{ applicationId: string }>
 }) {
-  const { user, profile } = await requireAdmin()
+  await requireAdmin()
   const { applicationId } = await params
   const supabase = await createClient()
 
-  const [{ count: unreadNotifications }, { data: application }, { data: items }] = await Promise.all([
-    q.getUnreadNotificationsCount(supabase, user.id),
+  const [{ data: application }, { data: items }] = await Promise.all([
     q.getApplicationById(supabase, applicationId),
     q.getApplicationPlaybookItems(supabase, applicationId),
   ])
@@ -32,12 +30,24 @@ export default async function AdminProgramDetailPage({
     status: string
     agency_id: string | null
     license_type_id: string | null
+    closed_at: string | null
+    close_reason: string | null
+    completed_at: string | null
+    complete_reason: string | null
+    category_id: string | null
+    subcategory_id: string | null
   }
   const app = application as unknown as AppRow
 
-  const { data: agencyData } = app.agency_id
-    ? await q.getAgencyNameById(supabase, app.agency_id)
-    : { data: null }
+  const [{ data: agencyData }, categoryResult, subcategoryResult] = await Promise.all([
+    app.agency_id ? q.getAgencyNameById(supabase, app.agency_id) : Promise.resolve({ data: null }),
+    app.category_id
+      ? supabase.from('configuration_values').select('name').eq('id', app.category_id).maybeSingle()
+      : Promise.resolve({ data: null }),
+    app.subcategory_id
+      ? supabase.from('configuration_values').select('name').eq('id', app.subcategory_id).maybeSingle()
+      : Promise.resolve({ data: null }),
+  ])
 
   const typedItems = (items ?? []) as ApplicationPlaybookItem[]
   const firstWithPlaybookItem = typedItems.find(i => i.playbook_item_id)
@@ -52,7 +62,6 @@ export default async function AdminProgramDetailPage({
   }
 
   return (
-    <AdminLayout user={{ id: user.id, email: user.email }} profile={profile} unreadNotifications={unreadNotifications || 0}>
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <Link
@@ -76,11 +85,16 @@ export default async function AdminProgramDetailPage({
           status={app.status}
           agencyId={app.agency_id}
           agencyName={agencyData?.name ?? null}
+          categoryName={(categoryResult.data as { name?: string } | null)?.name ?? null}
+          subcategoryName={(subcategoryResult.data as { name?: string } | null)?.name ?? null}
           playbookId={playbookId}
           initialItems={typedItems}
           isAdmin
+          closedAt={app.closed_at}
+          closeReason={app.close_reason}
+          completedAt={app.completed_at}
+          completeReason={app.complete_reason}
         />
       </div>
-    </AdminLayout>
   )
 }

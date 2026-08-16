@@ -1,22 +1,33 @@
-import { redirect } from 'next/navigation'
 import { getSession } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import ExpertDashboardLayout from '@/components/ExpertDashboardLayout'
 import ExpertClientsContent from '@/components/ExpertClientsContent'
 
-export default async function ExpertClientsPage() {
+const PAGE_SIZE = 50
+
+export default async function ExpertClientsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string; q?: string }>
+}) {
   const session = await getSession()
-  if (!session) redirect('/pages/auth/login')
-  if (session.profile?.role !== 'expert') redirect('/pages/agency')
+  const params  = await searchParams
+  const page    = Math.max(0, parseInt(params.page ?? '0') || 0)
+  const search  = params.q ?? ''
 
   const supabase = await createClient()
-  const { data: applicationsData } = await q.getApplicationsByAssignedExpertId(supabase, session.user.id)
-  const { count: unreadNotifications } = await q.getUnreadNotificationsCount(supabase, session.user.id)
+  const expertUserId = session!.user.id
 
-  // Bulk-fetch agency names — RLS migration 089 grants experts SELECT on agencies
+  const [appsResult, { count: totalCount }, { count: activeCount }, { count: pendingCount }] =
+    await Promise.all([
+      q.getApplicationsByAssignedExpertIdPaginated(supabase, expertUserId, { page, pageSize: PAGE_SIZE, search }),
+      supabase.from('applications').select('id', { count: 'exact', head: true }).eq('assigned_expert_id', expertUserId),
+      supabase.from('applications').select('id', { count: 'exact', head: true }).eq('assigned_expert_id', expertUserId).in('status', ['requested', 'in_progress', 'under_review', 'needs_revision']),
+      supabase.from('applications').select('id', { count: 'exact', head: true }).eq('assigned_expert_id', expertUserId).in('status', ['under_review', 'needs_revision']),
+    ])
+
   const agencyIds = Array.from(new Set(
-    (applicationsData ?? []).map(a => (a as any).agency_id).filter(Boolean) as string[]
+    (appsResult.data ?? []).map(a => (a as Record<string, unknown>).agency_id as string).filter(Boolean)
   ))
   const { data: agenciesData } = agencyIds.length > 0
     ? await q.getAgenciesByIds(supabase, agencyIds)
@@ -24,28 +35,17 @@ export default async function ExpertClientsPage() {
   const agencyNames: Record<string, string> = {}
   for (const a of agenciesData ?? []) agencyNames[a.id] = a.name
 
-  // Calculate statistics
-  const totalApplications = (applicationsData || []).length
-  const activeApplications = (applicationsData || []).filter(app =>
-    app.status === 'requested' || app.status === 'in_progress' || app.status === 'under_review' || app.status === 'needs_revision'
-  ).length
-  const pendingReviews = (applicationsData || []).filter(app =>
-    app.status === 'under_review' || app.status === 'needs_revision'
-  ).length
-
   return (
-    <ExpertDashboardLayout
-      user={{ id: session.user.id, email: session.user.email }}
-      profile={session.profile}
-      unreadNotifications={unreadNotifications || 0}
-    >
-      <ExpertClientsContent
-        applications={applicationsData || []}
-        totalApplications={totalApplications}
-        activeApplications={activeApplications}
-        pendingReviews={pendingReviews}
-        agencyNames={agencyNames}
-      />
-    </ExpertDashboardLayout>
+    <ExpertClientsContent
+      applications={appsResult.data ?? []}
+      totalCount={totalCount ?? 0}
+      page={page}
+      pageSize={PAGE_SIZE}
+      initialSearch={search}
+      totalApplications={totalCount ?? 0}
+      activeApplications={activeCount ?? 0}
+      pendingReviews={pendingCount ?? 0}
+      agencyNames={agencyNames}
+    />
   )
 }

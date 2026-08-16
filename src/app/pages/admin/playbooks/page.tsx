@@ -1,30 +1,23 @@
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import PlaybookLibraryContent from '@/components/PlaybookLibraryContent'
+import { getConfigurationValues } from '@/app/actions/configuration-values'
 
 export default async function AdminPlaybooksPage() {
-  const { user, profile } = await requireAdmin()
+  await requireAdmin()
   const supabase = await createClient()
 
-  const [{ count: unreadNotifications }, { data: playbooks }, { data: licenseRequirements }] =
+  const [{ data: playbooks }, { data: categories }] =
     await Promise.all([
-      q.getUnreadNotificationsCount(supabase, user.id),
       q.getAllPlaybooks(supabase),
-      supabase
-        .from('license_requirements')
-        .select('id, state, license_type')
-        .order('state')
-        .order('license_type'),
+      getConfigurationValues('PLAYBOOK_CATEGORY'),
     ])
 
   return (
-    <AdminLayout user={user} profile={profile} unreadNotifications={unreadNotifications || 0}>
       <PlaybookLibraryContent
         playbooks={(playbooks ?? []) as unknown as Parameters<typeof PlaybookLibraryContent>[0]['playbooks']}
-        licenseRequirements={(licenseRequirements ?? []) as { id: string; state: string; license_type: string }[]}
+        categories={(categories ?? []) as unknown as Parameters<typeof PlaybookLibraryContent>[0]['categories']}
       />
-    </AdminLayout>
   )
 }

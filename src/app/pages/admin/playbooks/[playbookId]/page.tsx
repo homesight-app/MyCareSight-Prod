@@ -4,9 +4,9 @@ import { ArrowLeft } from 'lucide-react'
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import PlaybookDetailContent, { type PlaybookRow } from '@/components/PlaybookDetailContent'
 import PlaybookNameHeading from '@/components/PlaybookNameHeading'
+import { getConfigurationValues } from '@/app/actions/configuration-values'
 
 const TYPE_LABELS: Record<string, string> = {
   license_requirement: 'License Requirement',
@@ -20,15 +20,15 @@ export default async function AdminPlaybookDetailPage({
 }: {
   params: Promise<{ playbookId: string }>
 }) {
-  const { user, profile } = await requireAdmin()
+  await requireAdmin()
   const { playbookId } = await params
   const supabase = await createClient()
 
-  const [{ count: unreadNotifications }, { data: playbook }, { data: items }, { data: templates }] = await Promise.all([
-    q.getUnreadNotificationsCount(supabase, user.id),
+  const [{ data: playbook }, { data: items }, { data: templates }, { data: categories }] = await Promise.all([
     q.getPlaybookById(supabase, playbookId),
     q.getPlaybookItems(supabase, playbookId),
     q.getPlaybookTemplates(supabase, playbookId),
+    getConfigurationValues('PLAYBOOK_CATEGORY'),
   ])
 
   if (!playbook) redirect('/pages/admin/playbooks')
@@ -38,7 +38,6 @@ export default async function AdminPlaybookDetailPage({
   const displayState = pb.state ?? lr?.state ?? null
 
   return (
-    <AdminLayout user={user} profile={profile} unreadNotifications={unreadNotifications || 0}>
       <div className="space-y-4 md:space-y-6">
         {/* Back button */}
         <Link
@@ -65,8 +64,8 @@ export default async function AdminPlaybookDetailPage({
           licenseRequirementId={lr?.id ?? null}
           initialItems={items ?? []}
           initialTemplates={(templates ?? []) as import('@/lib/supabase/query/playbooks').PlaybookTemplate[]}
+          categories={(categories ?? []) as unknown as Parameters<typeof PlaybookDetailContent>[0]['categories']}
         />
       </div>
-    </AdminLayout>
   )
 }

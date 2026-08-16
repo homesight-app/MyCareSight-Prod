@@ -1,21 +1,43 @@
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import LeadsContent from '@/components/LeadsContent'
 import { ADMIN_LEAD_CONTEXT } from '@/lib/constants/lead-configs'
 
-export default async function AdminLeadsPage() {
-  const { user, profile } = await requireAdmin()
+const PAGE_SIZE = 50
+
+export default async function AdminLeadsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    page?: string; q?: string; stage?: string; serviceType?: string
+    source?: string; sortKey?: string; sortDir?: string
+  }>
+}) {
+  await requireAdmin()
   const supabase = await createClient()
 
-  const [{ count: unreadNotifications }, { data: leads }] = await Promise.all([
-    q.getUnreadNotificationsCount(supabase, user.id),
-    q.getLeads(supabase, { leadType: 'agency', includeArchived: true }),
+  const params      = await searchParams
+  const page        = Math.max(0, parseInt(params.page ?? '0') || 0)
+  const search      = params.q ?? ''
+  const stageFilter = params.stage ?? 'active'
+  const serviceType = params.serviceType ?? 'all'
+  const source      = params.source ?? 'all'
+  const sortKey     = params.sortKey ?? 'created_at'
+  const sortDir     = (params.sortDir === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc'
+
+  const [leadsResult, stageCounts, allSources] = await Promise.all([
+    q.getLeadsPaginated(supabase, {
+      leadType: 'agency', page, pageSize: PAGE_SIZE,
+      search, stageFilter, serviceType, source, sortKey, sortDir,
+    }),
+    q.getLeadStageCounts(supabase, { leadType: 'agency', search, serviceType, source }),
+    q.getLeadDistinctSources(supabase, { leadType: 'agency' }),
   ])
 
+  const leads = (leadsResult.data ?? []) as Parameters<typeof LeadsContent>[0]['leads']
   const today = new Date().toISOString().slice(0, 10)
-  const activeLeadIds = (leads ?? [])
+  const activeLeadIds = leads
     .filter(l => l.status !== 'archived' && !['on_hold', 'lost', 'signed'].includes(l.stage))
     .map(l => l.id)
   const { data: taskRows } = await q.getLeadTaskStatusByLeadIds(supabase, activeLeadIds, today)
@@ -28,16 +50,21 @@ export default async function AdminLeadsPage() {
   }
 
   return (
-    <AdminLayout
-      user={user}
-      profile={profile}
-      unreadNotifications={unreadNotifications ?? 0}
-    >
-      <LeadsContent
-        leads={leads ?? []}
-        context={ADMIN_LEAD_CONTEXT}
-        taskStatus={taskStatus}
-      />
-    </AdminLayout>
+    <LeadsContent
+      leads={leads}
+      totalCount={leadsResult.count}
+      page={page}
+      pageSize={PAGE_SIZE}
+      initialSearch={search}
+      initialStageFilter={stageFilter}
+      initialServiceType={serviceType}
+      initialSource={source}
+      initialSortKey={sortKey}
+      initialSortDir={sortDir}
+      stageCounts={stageCounts}
+      allSources={allSources}
+      context={ADMIN_LEAD_CONTEXT}
+      taskStatus={taskStatus}
+    />
   )
 }

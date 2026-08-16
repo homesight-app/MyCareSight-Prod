@@ -1,7 +1,6 @@
 import { requireAdmin } from '@/lib/auth-helpers'
 import { createClient } from '@/lib/supabase/server'
 import * as q from '@/lib/supabase/query'
-import AdminLayout from '@/components/AdminLayout'
 import BillingContent from '@/components/BillingContent'
 import { getPricingForMonth } from '@/app/actions/pricing'
 import { getCachedAgenciesForBilling, getCachedLicenseTypesForBilling } from '@/lib/server-cache/reference-lists'
@@ -11,30 +10,33 @@ export default async function BillingPage({
 }: {
   searchParams: Promise<{ month?: string; year?: string }>
 }) {
-  const { user, profile } = await requireAdmin()
+  await requireAdmin()
   const supabase = await createClient()
   const params = await searchParams
 
-  const { count: unreadNotifications } = await q.getUnreadNotificationsCount(supabase, user.id)
   const now = new Date()
   const selectedMonth = params.month ? parseInt(params.month) : now.getMonth() + 1
   const selectedYear = params.year ? parseInt(params.year) : now.getFullYear()
 
-  const { data: agencies } = await getCachedAgenciesForBilling()
+  const [
+    { data: agencies },
+    { data: staffMembers },
+    { data: allCases },
+    { data: licenseTypes },
+    pricingResult,
+  ] = await Promise.all([
+    getCachedAgenciesForBilling(),
+    q.getStaffMembersWithAgencyActive(supabase),
+    q.getCasesOrderedByStartedDate(supabase),
+    getCachedLicenseTypesForBilling(),
+    getPricingForMonth(selectedYear, selectedMonth),
+  ])
 
   if (!agencies) {
     return (
-      <AdminLayout 
-        user={user} 
-        profile={profile} 
-        unreadNotifications={unreadNotifications || 0}
-      >
         <div>Error loading agencies</div>
-      </AdminLayout>
     )
   }
-
-  const { data: staffMembers } = await q.getStaffMembersWithAgencyActive(supabase)
 
   type StaffMember = { id: string; agency_id: string | null; [key: string]: any }
   const staffByAgency: Record<string, StaffMember[]> = {}
@@ -46,8 +48,6 @@ export default async function BillingPage({
       }
     })
   }
-
-  const { data: allCases } = await q.getCasesOrderedByStartedDate(supabase)
 
   type Case = {
     id: string
@@ -72,10 +72,6 @@ export default async function BillingPage({
     })
   }
 
-  const { data: licenseTypes } = await getCachedLicenseTypesForBilling()
-
-  // Get pricing that was effective for the selected month
-  const pricingResult = await getPricingForMonth(selectedYear, selectedMonth)
   const pricingData = pricingResult.data
   const ownerLicenseRate = pricingData?.owner_admin_license || 0
   const staffLicenseRate = pricingData?.staff_license || 0
@@ -111,11 +107,6 @@ export default async function BillingPage({
   const activeAgencies = agencies.length
 
   return (
-    <AdminLayout 
-      user={user} 
-      profile={profile} 
-      unreadNotifications={unreadNotifications || 0}
-    >
       <BillingContent
         baseBillingData={baseBillingData}
         selectedMonth={selectedMonth}
@@ -125,6 +116,5 @@ export default async function BillingPage({
         staffLicenseRate={staffLicenseRate}
         licenseTypes={(licenseTypes ?? []) as unknown as Parameters<typeof BillingContent>[0]['licenseTypes']}
       />
-    </AdminLayout>
   )
 }
