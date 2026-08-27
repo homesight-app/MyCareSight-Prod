@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, Plus } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import * as q from '@/lib/supabase/query'
@@ -9,6 +9,7 @@ import { createAgencyAdminAccount } from '@/app/actions/users'
 import { US_STATES } from '@/lib/constants'
 import { isValidUSPhone, isValidEmail, PHONE_ERROR, EMAIL_ERROR } from '@/lib/validation'
 import PhoneInput from '@/components/ui/PhoneInput'
+import { showValidationToast, showSuccessToast } from '@/lib/form-validation-toast'
 
 type AddNewClientModalMode = 'agency_admin' | 'care_recipient'
 
@@ -19,6 +20,8 @@ interface AddNewClientModalProps {
   onSuccess?: (insertedPatient?: Record<string, unknown>) => void
   /** When 'agency_admin', form targets clients table (company/contact fields). When 'care_recipient', targets patients. */
   mode?: AddNewClientModalMode
+  /** Pre-fills contact fields when opening from a lead conversion. */
+  prefill?: { firstName?: string; lastName?: string; email?: string; phone?: string; gender?: string; dateOfBirth?: string }
 }
 
 const AGENCY_FORM_INITIAL = {
@@ -32,10 +35,9 @@ const AGENCY_FORM_INITIAL = {
   status: 'active' as 'active' | 'inactive' | 'pending',
 }
 
-export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = 'care_recipient' }: AddNewClientModalProps) {
+export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = 'care_recipient', prefill }: AddNewClientModalProps) {
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   const [agencyFormData, setAgencyFormData] = useState(AGENCY_FORM_INITIAL)
 
@@ -58,18 +60,30 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
     class: ''
   })
 
+  useEffect(() => {
+    if (!isOpen || !prefill) return
+    setFormData(prev => ({
+      ...prev,
+      first_name:    prefill.firstName   ?? prev.first_name,
+      last_name:     prefill.lastName    ?? prev.last_name,
+      email_address: prefill.email       ?? prev.email_address,
+      phone_number:  prefill.phone       ?? prev.phone_number,
+      gender:        prefill.gender      ?? prev.gender,
+      date_of_birth: prefill.dateOfBirth ?? prev.date_of_birth,
+    }))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
   if (!isOpen) return null
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target
     setFormData(prev => ({ ...prev, [name]: value }))
-    setError(null)
   }
 
   const handleAgencyChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target
     setAgencyFormData(prev => ({ ...prev, [name]: value }))
-    setError(null)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -77,28 +91,27 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
 
     if (mode === 'agency_admin') {
       if (agencyFormData.contact_phone && !isValidUSPhone(agencyFormData.contact_phone)) {
-        setError(PHONE_ERROR)
+        showValidationToast({ error: PHONE_ERROR })
         return
       }
     }
 
     if (mode === 'care_recipient') {
       if (formData.phone_number && !isValidUSPhone(formData.phone_number)) {
-        setError(`Phone number: ${PHONE_ERROR}`)
+        showValidationToast({ error: `Phone number: ${PHONE_ERROR}` })
         return
       }
       if (formData.emergency_phone && !isValidUSPhone(formData.emergency_phone)) {
-        setError(`Emergency phone: ${PHONE_ERROR}`)
+        showValidationToast({ error: `Emergency phone: ${PHONE_ERROR}` })
         return
       }
       if (formData.email_address && !isValidEmail(formData.email_address)) {
-        setError(EMAIL_ERROR)
+        showValidationToast({ error: EMAIL_ERROR })
         return
       }
     }
 
     setIsLoading(true)
-    setError(null)
 
     try {
       if (mode === 'agency_admin') {
@@ -114,11 +127,12 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         )
 
         if (result.error) {
-          setError(result.error)
+          showValidationToast({ error: result.error })
           setIsLoading(false)
           return
         }
 
+        showSuccessToast('Agency admin added successfully')
         setAgencyFormData(AGENCY_FORM_INITIAL)
         onSuccess?.()
         await router.refresh()
@@ -130,14 +144,14 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
       const supabase = createClient()
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) {
-        setError('You must be logged in to add a client')
+        showValidationToast({ error: 'You must be logged in to add a client' })
         setIsLoading(false)
         return
       }
 
       const { data: up } = await q.getAgencyIdFromProfile(supabase, user.id)
       if (!up?.agency_id) {
-        setError('Your account is not linked to an agency. Please contact the administrator.')
+        showValidationToast({ error: 'Your account is not linked to an agency. Please contact the administrator.' })
         setIsLoading(false)
         return
       }
@@ -146,7 +160,7 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         agency_id: up.agency_id,
         first_name: formData.first_name,
         last_name: formData.last_name,
-        date_of_birth: formData.date_of_birth,
+        date_of_birth: formData.date_of_birth || null,
         street_address: formData.street_address,
         city: formData.city,
         state: formData.state,
@@ -164,7 +178,7 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
       })
 
       if (insertError || !insertedPatient) {
-        setError(insertError?.message ?? 'Failed to create client profile.')
+        showValidationToast({ error: insertError?.message ?? 'Failed to create client profile.' })
         setIsLoading(false)
         return
       }
@@ -202,11 +216,12 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         class: ''
       })
 
+      showSuccessToast('Client added successfully')
       onSuccess?.(insertedPatient as Record<string, unknown>)
       await router.refresh()
       onClose()
-    } catch (err) {
-      setError('An unexpected error occurred. Please try again.')
+    } catch {
+      showValidationToast({ error: 'An unexpected error occurred. Please try again.' })
     } finally {
       setIsLoading(false)
     }
@@ -237,13 +252,7 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="p-6">
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
-              {error}
-            </div>
-          )}
-
+        <form onSubmit={handleSubmit} noValidate className="p-6">
           {mode === 'agency_admin' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -402,7 +411,7 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
             {/* Date of Birth */}
             <div>
               <label htmlFor="date_of_birth" className="block text-sm font-semibold text-gray-700 mb-2">
-                Date of Birth <span className="text-red-500">*</span>
+                Date of Birth
               </label>
               <input
                 type="date"
@@ -410,7 +419,6 @@ export default function AddNewClientModal({ isOpen, onClose, onSuccess, mode = '
                 name="date_of_birth"
                 value={formData.date_of_birth}
                 onChange={handleChange}
-                required
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>

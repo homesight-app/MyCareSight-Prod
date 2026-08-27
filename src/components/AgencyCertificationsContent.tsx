@@ -1,9 +1,11 @@
 'use client'
 
-import { useState, useMemo } from 'react'
-import { Search, FileText, ChevronDown } from 'lucide-react'
+import { useState, useMemo, useEffect } from 'react'
+import { Search, FileText, ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react'
 import { type CertLicense } from './CertificationDetailModal'
 import CertificationDetailModal from './CertificationDetailModal'
+import TablePagination from '@/components/ui/TablePagination'
+import { formatDateShort } from '@/lib/format-date'
 
 const CERT_CATEGORIES: { value: string; label: string }[] = [
   { value: 'all',           label: 'All' },
@@ -23,13 +25,6 @@ const STATUS_COLORS: Record<string, string> = {
   pending:  'bg-yellow-100 text-yellow-700',
 }
 
-function formatDate(dateStr?: string | null) {
-  if (!dateStr) return '—'
-  try {
-    return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  } catch { return '—' }
-}
-
 function isExpiringSoon(expiryDate?: string | null) {
   if (!expiryDate) return false
   const days = (new Date(expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
@@ -39,11 +34,8 @@ function isExpiringSoon(expiryDate?: string | null) {
 type SortKey = 'name' | 'state' | 'number' | 'activated' | 'expires' | 'status'
 
 function SortIcon({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) {
-  return (
-    <span className={`text-xs ${active ? 'text-blue-600' : 'text-gray-300'}`}>
-      {!active ? '↕' : dir === 'asc' ? '↑' : '↓'}
-    </span>
-  )
+  if (!active) return <ChevronsUpDown className="w-3 h-3 opacity-40" />
+  return dir === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
 }
 
 interface AgencyCertificationsContentProps {
@@ -58,6 +50,10 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
   const [sortKey, setSortKey] = useState<SortKey>('name')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [selectedCertId, setSelectedCertId] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 50
+
+  useEffect(() => { setPage(0) }, [search, statusFilter, catFilter, sortKey, sortDir])
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -89,6 +85,11 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
       })
   }, [certifications, statusFilter, search, catFilter, sortKey, sortDir])
 
+  const pagedDisplayed = useMemo(
+    () => displayed.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    [displayed, page]
+  )
+
   const selectedCert = selectedCertId ? certifications.find(l => l.id === selectedCertId) ?? null : null
 
   return (
@@ -98,7 +99,7 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
         <p className="text-sm text-gray-500 mt-1">View and manage your agency&apos;s certifications and license documents.</p>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center gap-3 justify-between">
           <div className="flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
@@ -107,7 +108,7 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
               {certifications.length}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
               <input
@@ -118,18 +119,26 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
                 className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-44"
               />
             </div>
-            <div className="relative">
-              <select
-                value={statusFilter}
-                onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}
-                className="appearance-none pl-3 pr-7 py-1.5 text-sm bg-white border border-gray-200 rounded-lg text-gray-700 focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
-              >
-                <option value="all">All Statuses</option>
-                <option value="active">Active</option>
-                <option value="expiring">Expiring Soon</option>
-                <option value="expired">Expired</option>
-              </select>
-              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+            <div className="inline-flex bg-gray-100 rounded-xl p-1 gap-1">
+              {([
+                { value: 'all',      label: 'All' },
+                { value: 'active',   label: 'Active' },
+                { value: 'expiring', label: 'Expiring' },
+                { value: 'expired',  label: 'Expired' },
+              ] as const).map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setStatusFilter(value)}
+                  className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+                    statusFilter === value
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
         </div>
@@ -161,9 +170,9 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
+            <table className="min-w-full">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50/60">
                   {([
                     ['name',      'Certification'],
                     ['state',     'State'],
@@ -175,7 +184,7 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
                     <th
                       key={key}
                       onClick={() => handleSort(key)}
-                      className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider cursor-pointer select-none hover:text-gray-900"
+                      className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide cursor-pointer select-none hover:text-gray-700"
                     >
                       <span className="inline-flex items-center gap-1">
                         {label} <SortIcon active={sortKey === key} dir={sortDir} />
@@ -184,12 +193,12 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
                   ))}
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {displayed.map(cert => (
+              <tbody className="divide-y divide-gray-50">
+                {pagedDisplayed.map(cert => (
                   <tr
                     key={cert.id}
                     onClick={() => setSelectedCertId(cert.id)}
-                    className="hover:bg-blue-50 cursor-pointer transition-colors"
+                    className="hover:bg-gray-50/50 cursor-pointer transition-colors"
                   >
                     <td className="px-4 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">
                       {cert.license_name}
@@ -207,10 +216,10 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
                       {cert.license_number || '—'}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
-                      {formatDate(cert.activated_date)}
+                      {formatDateShort(cert.activated_date)}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
-                      {formatDate(cert.expiry_date)}
+                      {formatDateShort(cert.expiry_date)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${STATUS_COLORS[cert.status] ?? 'bg-gray-100 text-gray-600'}`}>
@@ -224,6 +233,16 @@ export default function AgencyCertificationsContent({ certifications, agencyId }
               </tbody>
             </table>
           </div>
+        )}
+
+        {displayed.length > 0 && (
+          <TablePagination
+            page={page}
+            pageSize={PAGE_SIZE}
+            totalCount={displayed.length}
+            onPageChange={setPage}
+            entityLabel="certifications"
+          />
         )}
       </div>
 

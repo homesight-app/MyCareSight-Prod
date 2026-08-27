@@ -25,6 +25,77 @@ const getStateAbbr = (state: string) => {
   return state.length > 2 ? state.substring(0, 2).toUpperCase() : state.toUpperCase()
 }
 
+function PlaybookCard({ playbook, onSelect }: { playbook: StandalonePlaybook; onSelect: (p: StandalonePlaybook) => void }) {
+  return (
+    <button
+      onClick={() => onSelect(playbook)}
+      className="w-full text-left bg-gray-50 hover:bg-gray-100 rounded-xl p-5 transition-all border border-gray-200 hover:border-teal-300 hover:shadow-md"
+    >
+      <div className="flex items-center gap-4">
+        <div className="w-16 h-16 bg-teal-100 rounded-lg flex items-center justify-center flex-shrink-0 relative">
+          <BookOpen className="w-8 h-8 text-teal-600" />
+          <span className="absolute -top-1.5 -right-1.5 text-[10px] font-bold bg-teal-500 text-white px-1.5 py-0.5 rounded-full leading-none">
+            Program
+          </span>
+        </div>
+        <div className="flex-1">
+          <h3 className="font-bold text-gray-900 text-lg mb-1">{playbook.name}</h3>
+          <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+            {playbook.state === null ? (
+              <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full font-semibold">
+                National
+              </span>
+            ) : (
+              <span className="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full font-semibold">
+                {playbook.state}
+              </span>
+            )}
+            {playbook.category && (
+              <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full font-medium">
+                {playbook.category.name}
+              </span>
+            )}
+            {playbook.subcategory && (
+              <span className="text-xs bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 rounded-full">
+                {playbook.subcategory.name}
+              </span>
+            )}
+          </div>
+          {playbook.description && (
+            <p className="text-gray-600 text-sm mb-3">{playbook.description}</p>
+          )}
+          <div className="flex flex-wrap gap-4 text-sm">
+            {playbook.cost_display && (
+              <div className="flex items-center gap-2">
+                <DollarSign className="w-4 h-4 text-green-600" />
+                <span className="text-gray-700 font-medium">Fee:</span>
+                <span className="text-gray-600">{playbook.cost_display}</span>
+              </div>
+            )}
+            {playbook.service_fee_display && (
+              <div className="flex items-center gap-2">
+                <DollarSign className="w-4 h-4 text-blue-600" />
+                <span className="text-gray-700 font-medium">Service Fee:</span>
+                <span className="text-gray-600">{playbook.service_fee_display}</span>
+              </div>
+            )}
+            {playbook.processing_time_display && (
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-orange-600" />
+                <span className="text-gray-700 font-medium">Timeline:</span>
+                <span className="text-gray-600">{playbook.processing_time_display}</span>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex-shrink-0">
+          <ArrowRight className="w-6 h-6 text-gray-400" />
+        </div>
+      </div>
+    </button>
+  )
+}
+
 export default function SelectLicenseTypeModal({
   isOpen,
   onClose,
@@ -48,14 +119,24 @@ export default function SelectLicenseTypeModal({
     [categories, selectedCategoryId]
   )
 
-  const filteredPlaybooks = useMemo(() => {
-    return standalonePlaybooks.filter(p => {
-      if (search.trim() && !p.name.toLowerCase().includes(search.trim().toLowerCase())) return false
-      if (selectedCategoryId && p.category_id !== selectedCategoryId) return false
-      if (selectedSubcategoryId && p.subcategory_id !== selectedSubcategoryId) return false
-      return true
-    })
-  }, [standalonePlaybooks, search, selectedCategoryId, selectedSubcategoryId])
+  const applyFilters = (p: StandalonePlaybook) => {
+    if (search.trim() && !p.name.toLowerCase().includes(search.trim().toLowerCase())) return false
+    if (selectedCategoryId && p.category_id !== selectedCategoryId) return false
+    if (selectedSubcategoryId && p.subcategory_id !== selectedSubcategoryId) return false
+    return true
+  }
+
+  const filteredStatePlaybooks = useMemo(
+    () => standalonePlaybooks.filter(p => p.state !== null && applyFilters(p)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [standalonePlaybooks, search, selectedCategoryId, selectedSubcategoryId]
+  )
+
+  const filteredNationalPlaybooks = useMemo(
+    () => standalonePlaybooks.filter(p => p.state === null && applyFilters(p)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [standalonePlaybooks, search, selectedCategoryId, selectedSubcategoryId]
+  )
 
   const fetchLicenseTypes = useCallback(async () => {
     setIsLoading(true)
@@ -98,7 +179,7 @@ export default function SelectLicenseTypeModal({
   }, [state])
 
   useEffect(() => {
-    if (isOpen && state) {
+    if (isOpen) {
       setSearch('')
       setSelectedCategoryId('')
       setSelectedSubcategoryId('')
@@ -109,7 +190,7 @@ export default function SelectLicenseTypeModal({
   const hasActiveFilters = search.trim() || selectedCategoryId || selectedSubcategoryId
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={programsOnly ? `Select Program - ${getStateAbbr(state)}` : `Select License Type - ${getStateAbbr(state)}`} size="lg">
+    <Modal isOpen={isOpen} onClose={onClose} title={programsOnly ? (state ? `Select Program - ${getStateAbbr(state)}` : 'Select Program') : `Select License Type - ${getStateAbbr(state)}`} size="lg">
       <div className="space-y-4">
         {isLoading && (
           <div className="flex items-center justify-center py-12">
@@ -163,7 +244,7 @@ export default function SelectLicenseTypeModal({
           </div>
         )}
 
-        {!isLoading && !error && (programsOnly ? filteredPlaybooks.length === 0 : licenseTypes.length === 0 && standalonePlaybooks.length === 0) && (
+        {!isLoading && !error && (programsOnly ? filteredStatePlaybooks.length === 0 && filteredNationalPlaybooks.length === 0 : licenseTypes.length === 0 && standalonePlaybooks.length === 0) && (
           <div className="text-center py-12">
             <p className="text-gray-600">
               {programsOnly
@@ -233,69 +314,25 @@ export default function SelectLicenseTypeModal({
           </button>
         ))}
 
-        {/* Standalone playbooks (programs) */}
-        {!isLoading && filteredPlaybooks.length > 0 && onSelectPlaybook && filteredPlaybooks.map((playbook) => (
-          <button
-            key={playbook.id}
-            onClick={() => onSelectPlaybook(playbook)}
-            className="w-full text-left bg-gray-50 hover:bg-gray-100 rounded-xl p-5 transition-all border border-gray-200 hover:border-teal-300 hover:shadow-md"
-          >
-            <div className="flex items-center gap-4">
-              <div className="w-16 h-16 bg-teal-100 rounded-lg flex items-center justify-center flex-shrink-0 relative">
-                <BookOpen className="w-8 h-8 text-teal-600" />
-                <span className="absolute -top-1.5 -right-1.5 text-[10px] font-bold bg-teal-500 text-white px-1.5 py-0.5 rounded-full leading-none">
-                  Program
-                </span>
-              </div>
-              <div className="flex-1">
-                <h3 className="font-bold text-gray-900 text-lg mb-1">{playbook.name}</h3>
-                {(playbook.category || playbook.subcategory) && (
-                  <div className="flex items-center gap-1.5 mb-2">
-                    {playbook.category && (
-                      <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full font-medium">
-                        {playbook.category.name}
-                      </span>
-                    )}
-                    {playbook.subcategory && (
-                      <span className="text-xs bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 rounded-full">
-                        {playbook.subcategory.name}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {playbook.description && (
-                  <p className="text-gray-600 text-sm mb-3">{playbook.description}</p>
-                )}
-                <div className="flex flex-wrap gap-4 text-sm">
-                  {playbook.cost_display && (
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="w-4 h-4 text-green-600" />
-                      <span className="text-gray-700 font-medium">Fee:</span>
-                      <span className="text-gray-600">{playbook.cost_display}</span>
-                    </div>
-                  )}
-                  {playbook.service_fee_display && (
-                    <div className="flex items-center gap-2">
-                      <DollarSign className="w-4 h-4 text-blue-600" />
-                      <span className="text-gray-700 font-medium">Service Fee:</span>
-                      <span className="text-gray-600">{playbook.service_fee_display}</span>
-                    </div>
-                  )}
-                  {playbook.processing_time_display && (
-                    <div className="flex items-center gap-2">
-                      <Clock className="w-4 h-4 text-orange-600" />
-                      <span className="text-gray-700 font-medium">Timeline:</span>
-                      <span className="text-gray-600">{playbook.processing_time_display}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="flex-shrink-0">
-                <ArrowRight className="w-6 h-6 text-gray-400" />
-              </div>
-            </div>
-          </button>
+        {/* State-specific programs */}
+        {!isLoading && filteredStatePlaybooks.length > 0 && onSelectPlaybook && filteredStatePlaybooks.map((playbook) => (
+          <PlaybookCard key={playbook.id} playbook={playbook} onSelect={onSelectPlaybook} />
         ))}
+
+        {/* National programs */}
+        {!isLoading && filteredNationalPlaybooks.length > 0 && onSelectPlaybook && (
+          <>
+            <div className="flex items-center gap-3 pt-2">
+              <div className="flex-1 border-t border-gray-200" />
+              <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider whitespace-nowrap">National Programs</span>
+              <div className="flex-1 border-t border-gray-200" />
+            </div>
+            <p className="text-xs text-gray-500 -mt-2">Available in all states</p>
+            {filteredNationalPlaybooks.map((playbook) => (
+              <PlaybookCard key={playbook.id} playbook={playbook} onSelect={onSelectPlaybook} />
+            ))}
+          </>
+        )}
 
         {/* Back Button */}
         <div className="pt-4 border-t border-gray-200">

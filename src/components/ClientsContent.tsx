@@ -3,13 +3,15 @@
 import { useState, useEffect, useTransition, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { Users, CheckCircle2, FileText, Plus, Search, Eye, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Users, CheckCircle2, FileText, Plus, Search, Eye, ChevronLeft, ChevronRight } from 'lucide-react'
 import LoadingSpinner from '@/components/LoadingSpinner'
+import RecordActionsMenu from '@/components/ui/RecordActionsMenu'
 import AddNewClientModal from './AddNewClientModal'
 import { createClient } from '@/lib/supabase/client'
 import * as q from '@/lib/supabase/query'
 import { mapInsertedPatientToListPatient, type ClientsListPatient } from '@/lib/map-inserted-patient-to-list-row'
 import { patientFullName } from '@/lib/patient-name'
+import { linkLeadToPatient, createRepresentativeFromLeadAction } from '@/app/actions/leads'
 
 interface ClientsContentProps {
   clients: ClientsListPatient[]
@@ -20,6 +22,8 @@ interface ClientsContentProps {
   pageSize: number
   search: string
   statusFilter: string
+  leadId?: string | null
+  prefill?: { firstName: string; lastName: string; email: string; phone: string; gender?: string; dateOfBirth?: string }
 }
 
 export default function ClientsContent({
@@ -31,9 +35,16 @@ export default function ClientsContent({
   pageSize,
   search: initialSearch,
   statusFilter: initialStatusFilter,
+  leadId,
+  prefill,
 }: ClientsContentProps) {
   const router = useRouter()
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [convertLeadId, setConvertLeadId] = useState(leadId ?? null)
+
+  useEffect(() => {
+    if (leadId) setIsModalOpen(true)
+  }, [leadId])
   const [searchQuery, setSearchQuery] = useState(initialSearch)
   const [statusFilter, setStatusFilter] = useState(initialStatusFilter)
   const [clients, setClients] = useState<ClientsListPatient[]>(initialClients)
@@ -43,13 +54,8 @@ export default function ClientsContent({
 
   useEffect(() => { setPortalMounted(true) }, [])
 
-  // Merge optimistic additions with server data (preserves newly added rows until server confirms)
   useEffect(() => {
-    setClients((prev) => {
-      const serverIds = new Set(initialClients.map((c) => c.id))
-      const pendingOnlyOnClient = prev.filter((p) => !serverIds.has(p.id))
-      return [...pendingOnlyOnClient, ...initialClients]
-    })
+    setClients(initialClients)
   }, [initialClients])
 
   // Sync filter state when URL params change (e.g. browser back/forward)
@@ -100,18 +106,19 @@ export default function ClientsContent({
 
   const toggleStatus = async (clientId: string, currentStatus: 'active' | 'inactive') => {
     const newStatus = currentStatus === 'active' ? 'inactive' : 'active'
-    setClients((prev) => prev.map((c) => (c.id === clientId ? { ...c, status: newStatus } : c)))
+    if (statusFilter !== 'all') {
+      setClients((prev) => prev.filter((c) => c.id !== clientId))
+    } else {
+      setClients((prev) => prev.map((c) => (c.id === clientId ? { ...c, status: newStatus } : c)))
+    }
     try {
       const supabase = createClient()
       const { error } = await q.updatePatientStatus(supabase, clientId, newStatus)
-      if (error) {
-        setClients((prev) => prev.map((c) => (c.id === clientId ? { ...c, status: currentStatus } : c)))
-        console.error('Error updating status:', error)
-      }
+      if (error) console.error('Error updating status:', error)
     } catch (error) {
-      setClients((prev) => prev.map((c) => (c.id === clientId ? { ...c, status: currentStatus } : c)))
       console.error('Error updating status:', error)
     }
+    router.refresh()
   }
 
   const getInitials = (name: string) =>
@@ -199,44 +206,65 @@ export default function ClientsContent({
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
-          <select
-            value={statusFilter}
-            onChange={(e) => handleStatusChange(e.target.value)}
-            className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          >
-            <option value="all">All Status</option>
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
-          </select>
+          <div className="inline-flex bg-gray-100 rounded-xl p-1 gap-1">
+            {(['active', 'inactive', 'all'] as const).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => handleStatusChange(t)}
+                className={`px-4 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                  statusFilter === t
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {t === 'all' ? 'All' : t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Clients Table */}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">CLIENT</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">GENDER</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">CLASS</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">PATIENT PHONE</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">EMERGENCY CONTACT</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">REPRESENTATIVE #1</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">REPRESENTATIVE #2</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">STATUS</th>
-                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">ACTIONS</th>
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50/60">
+                <th className="w-10 px-2" />
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Client</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Gender</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Class</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Patient Phone</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Emergency Contact</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Representative #1</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Representative #2</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="divide-y divide-gray-50">
               {clients.length > 0 ? (
                 clients.map((client) => (
                   <tr
                     key={client.id}
-                    className={`hover:bg-gray-50 cursor-pointer ${navigatingClientId ? 'opacity-70 pointer-events-none' : ''}`}
+                    className={`hover:bg-gray-50/50 cursor-pointer transition-colors ${navigatingClientId ? 'opacity-70 pointer-events-none' : ''}`}
                     onClick={() => handleOpenClientDetails(client.id)}
                   >
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="w-10 px-2 py-3" onClick={(e) => e.stopPropagation()}>
+                      <RecordActionsMenu
+                        label={`Actions for ${patientFullName(client)}`}
+                        actions={[
+                          { label: 'View Details', icon: Eye, href: `/pages/agency/clients/${client.id}` },
+                          {
+                            label: client.status === 'active' ? 'Deactivate' : 'Activate',
+                            onClick: () => toggleStatus(client.id, client.status),
+                            destructive: client.status === 'active',
+                            positive: client.status !== 'active',
+                          },
+                        ]}
+                      />
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-semibold text-sm">
                           {getInitials(patientFullName(client))}
@@ -247,18 +275,18 @@ export default function ClientsContent({
                         </div>
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{client.gender || 'N/A'}</td>
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{client.gender || 'N/A'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">
                       {client.class ? (
                         <span className="px-2 py-1 bg-blue-50 text-blue-700 text-xs rounded-full">{client.class}</span>
                       ) : (
                         <span className="text-sm text-gray-500">N/A</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                       {client.phone_number?.trim() ? client.phone_number : <span className="text-gray-400">-</span>}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                       {client.emergency_contact_name?.trim() ? (
                         <div>
                           <div>{client.emergency_contact_name}</div>
@@ -268,7 +296,7 @@ export default function ClientsContent({
                         <span className="text-gray-400">-</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                       {client.patients_representatives.length > 0 ? (
                         <div>
                           <div>{client.patients_representatives[0].name}</div>
@@ -281,7 +309,7 @@ export default function ClientsContent({
                         <span className="text-gray-400">-</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
                       {client.patients_representatives.length > 1 ? (
                         <div>
                           <div>{client.patients_representatives[1].name}</div>
@@ -294,34 +322,10 @@ export default function ClientsContent({
                         <span className="text-gray-400">-</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={client.status === 'active'}
-                          onChange={() => toggleStatus(client.id, client.status)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="sr-only peer"
-                        />
-                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                        <span className="ml-3 text-sm font-medium text-gray-700">
-                          {client.status === 'active' ? 'Active' : 'Inactive'}
-                        </span>
-                      </label>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenClientDetails(client.id)}
-                        disabled={navigatingClientId !== null}
-                        className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-800 font-medium disabled:opacity-70 disabled:cursor-not-allowed"
-                      >
-                        {navigatingClientId === client.id ? (
-                          <><Loader2 className="w-4 h-4 animate-spin" />Loading...</>
-                        ) : (
-                          <><Eye className="w-4 h-4" />View Details</>
-                        )}
-                      </button>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${client.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                        {client.status === 'active' ? 'Active' : 'Inactive'}
+                      </span>
                     </td>
                   </tr>
                 ))
@@ -339,7 +343,7 @@ export default function ClientsContent({
 
         {/* Pagination footer */}
         {totalCount > 0 && (
-          <div className="px-6 py-3 border-t border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-gray-50">
+          <div className="px-6 py-3 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-gray-50">
             <p className="text-sm text-gray-600">
               Showing <span className="font-medium">{displayFrom}–{displayTo}</span> of{' '}
               <span className="font-medium">{totalCount}</span> clients
@@ -372,11 +376,20 @@ export default function ClientsContent({
       {/* Add New Client Modal */}
       <AddNewClientModal
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSuccess={(insertedRow) => {
+        onClose={() => { setIsModalOpen(false); setConvertLeadId(null) }}
+        prefill={prefill}
+        onSuccess={async (insertedRow) => {
           if (!insertedRow) return
           const next = mapInsertedPatientToListPatient(insertedRow)
           setClients((prev) => [next, ...prev.filter((c) => c.id !== next.id)])
+          if (convertLeadId && insertedRow.id) {
+            const patientId = insertedRow.id as string
+            await Promise.all([
+              linkLeadToPatient(convertLeadId, patientId),
+              createRepresentativeFromLeadAction(convertLeadId, patientId),
+            ])
+            setConvertLeadId(null)
+          }
         }}
       />
     </div>
