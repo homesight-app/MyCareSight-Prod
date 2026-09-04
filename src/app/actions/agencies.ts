@@ -7,6 +7,7 @@ import * as q from '@/lib/supabase/query'
 import { getSession } from '@/lib/auth'
 import { normalizeAgencyAdminIds } from '@/lib/agency-admin-ids'
 import { STORAGE_BUCKET } from '@/lib/supabase/storage'
+import { uploadFile, removeFiles } from '@/lib/storage/client'
 import {
   CACHE_TAG_AGENCIES_FOR_BILLING,
   CACHE_TAG_AGENCIES_ID_NAME,
@@ -365,7 +366,9 @@ export async function removeAdminFromAgency(agencyId: string, adminId: string) {
   }
 }
 
-/** Admin/expert: set an agency's status to 'active' or 'inactive'. */
+/** Admin/expert: set an agency's status to 'active' or 'inactive'.
+ *  user_profiles.is_active is the single source of truth for login access —
+ *  role table status columns (agency_admins, care_coordinators, caregiver_members) are not written here. */
 export async function setAgencyStatus(agencyId: string, status: 'active' | 'inactive') {
   const session = await getSession()
   if (!session) return { error: 'Not authenticated', data: null }
@@ -373,12 +376,24 @@ export async function setAgencyStatus(agencyId: string, status: 'active' | 'inac
   if (role !== 'admin' && role !== 'expert') return { error: 'Forbidden', data: null }
 
   const supabase = createAdminClient()
+  const isActive = status === 'active'
+  const now = new Date().toISOString()
+
   try {
-    const { error } = await supabase
+    const { error: agencyError } = await supabase
       .from('agencies')
-      .update({ status, updated_at: new Date().toISOString() })
+      .update({ status, updated_at: now })
       .eq('id', agencyId)
-    if (error) return { error: error.message, data: null }
+    if (agencyError) return { error: agencyError.message, data: null }
+
+    // Cascade to user_profiles only — agency-scoped roles, never admin/expert
+    const { error: profilesError } = await supabase
+      .from('user_profiles')
+      .update({ is_active: isActive, updated_at: now })
+      .eq('agency_id', agencyId)
+      .in('role', ['company_owner', 'care_coordinator', 'staff_member'])
+    if (profilesError) return { error: `Agency updated but failed to sync user accounts: ${profilesError.message}`, data: null }
+
     revalidateAgencyDetailPages()
     revalidateAgencyListCaches()
     return { error: null, data: { success: true } }
@@ -397,22 +412,45 @@ export async function addAgencyNote(
   if (!session) return { error: 'Not authenticated' }
 
   const supabase = await createClient()
-  const { error } = await supabase.from('agency_notes').insert({
+  const { data: note, error } = await supabase.from('agency_notes').insert({
     agency_id: agencyId,
     author_id: session.user.id,
     content: payload.content,
     note_type: payload.noteType,
-  })
+  }).select('id').single()
 
   if (error) return { error: error.message }
+
+  const { error: auditErr } = await supabase.from('audit_log').insert({
+    agency_id: agencyId,
+    table_name: 'agency_notes',
+    record_id: note.id,
+    action: 'CREATE',
+    performed_by_user_id: session.user.id,
+    details: { note_type: payload.noteType },
+  })
+  if (auditErr) console.error('[agencies/addAgencyNote] Audit log failed. noteId=%s err=%s', note.id, auditErr.message)
+
   revalidateAgencyDetailPages()
   return { error: null }
 }
 
 export async function deleteAgencyNote(agencyId: string, noteId: string) {
   const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
   const { error } = await supabase.from('agency_notes').delete().eq('id', noteId)
   if (error) return { error: error.message }
+
+  const { error: auditErr } = await supabase.from('audit_log').insert({
+    agency_id: agencyId,
+    table_name: 'agency_notes',
+    record_id: noteId,
+    action: 'DELETE',
+    performed_by_user_id: user?.id ?? null,
+    details: {},
+  })
+  if (auditErr) console.error('[agencies/deleteAgencyNote] Audit log failed. noteId=%s err=%s', noteId, auditErr.message)
+
   revalidateAgencyDetailPages()
   return { error: null }
 }
@@ -436,7 +474,7 @@ export async function uploadAgencyDocument(
   const ext = file.name.split('.').pop()
   const filePath = `${agencyId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
 
-  const { error: uploadErr } = await supabase.storage.from(STORAGE_BUCKET.AGENCY).upload(filePath, file)
+  const { error: uploadErr } = await uploadFile(supabase, STORAGE_BUCKET.AGENCY, filePath, file)
   if (uploadErr) return { error: uploadErr.message }
 
   const { data, error: insertErr } = await q.insertAgencyDocument(supabase, {
@@ -449,10 +487,20 @@ export async function uploadAgencyDocument(
   })
 
   if (insertErr) {
-    const { error: cleanupErr } = await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+    const { error: cleanupErr } = await removeFiles(supabase, STORAGE_BUCKET.AGENCY, [filePath])
     if (cleanupErr) console.error('[agencies/uploadAgencyDocument] Storage cleanup failed. path=%s err=%s', filePath, cleanupErr.message)
     return { error: insertErr.message }
   }
+
+  const { error: auditErr } = await supabase.from('audit_log').insert({
+    agency_id: agencyId,
+    table_name: 'agency_documents',
+    record_id: data!.id,
+    action: 'CREATE',
+    performed_by_user_id: session.user.id,
+    details: { document_name: documentName.trim(), document_type: documentType ?? null, file_name: file.name },
+  })
+  if (auditErr) console.error('[agencies/uploadAgencyDocument] Audit log failed. docId=%s err=%s', data!.id, auditErr.message)
 
   revalidateAgencyDetailPages()
   return { error: null, doc: { id: data!.id, document_name: documentName.trim(), file_url: filePath } }
@@ -460,10 +508,115 @@ export async function uploadAgencyDocument(
 
 export async function deleteAgencyDocumentAction(agencyId: string, docId: string, filePath: string) {
   const supabase = await createClient()
-  const { error: storageErr } = await supabase.storage.from(STORAGE_BUCKET.AGENCY).remove([filePath])
+  const { data: { user } } = await supabase.auth.getUser()
+  const { error: storageErr } = await removeFiles(supabase, STORAGE_BUCKET.AGENCY, [filePath])
   if (storageErr) console.error('[agencies/deleteAgencyDocument] Storage delete failed. path=%s err=%s', filePath, storageErr.message)
   const { error } = await q.deleteAgencyDocument(supabase, docId)
   if (error) return { error: error.message }
+
+  const { error: auditErr } = await supabase.from('audit_log').insert({
+    agency_id: agencyId,
+    table_name: 'agency_documents',
+    record_id: docId,
+    action: 'DELETE',
+    performed_by_user_id: user?.id ?? null,
+    details: { file_path: filePath },
+  })
+  if (auditErr) console.error('[agencies/deleteAgencyDocument] Audit log failed. docId=%s err=%s', docId, auditErr.message)
+
   revalidateAgencyDetailPages()
   return { error: null }
+}
+
+// ─── Agency Branding ─────────────────────────────────────────────────────────
+
+function agencyBrandingPublicUrl(path: string | null | undefined): string | null {
+  if (!path) return null
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  if (!supabaseUrl) return null
+  return `${supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET.AGENCY_PUBLIC}/${path}`
+}
+
+export async function getAgencyBrandingAction(agencyId: string) {
+  const supabase = await createClient()
+  const { data } = await q.getAgencyBranding(supabase, agencyId)
+  return {
+    logoUrl: agencyBrandingPublicUrl(data?.logo_path),
+    logoIconUrl: agencyBrandingPublicUrl(data?.logo_icon_path),
+    primaryColor: data?.primary_color ?? null,
+    sidebarColor: data?.sidebar_color ?? null,
+  }
+}
+
+export async function updateAgencyBrandingAction(
+  agencyId: string,
+  payload: { primaryColor: string; sidebarColor: string }
+): Promise<{ success: boolean; error: string | null }> {
+  const supabase = await createClient()
+  const { error } = await q.updateAgencyBrandingColors(supabase, agencyId, {
+    primary_color: payload.primaryColor,
+    sidebar_color: payload.sidebarColor,
+  })
+  if (error) return { success: false, error: (error as { message?: string }).message ?? 'Failed to save' }
+  revalidatePath('/pages/agency', 'layout')
+  revalidatePath('/pages/caregiver', 'layout')
+  return { success: true, error: null }
+}
+
+export async function uploadAgencyLogoAction(
+  agencyId: string,
+  formData: FormData,
+  variant: 'full' | 'icon'
+): Promise<{ url: string | null; error: string | null }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { url: null, error: 'Unauthorized' }
+
+  const file = formData.get('file') as File | null
+  if (!file || file.size === 0) return { url: null, error: 'No file provided' }
+  if (!file.type.startsWith('image/')) return { url: null, error: 'File must be an image' }
+  if (file.size > 5 * 1024 * 1024) return { url: null, error: 'File must be under 5MB' }
+
+  const colKey = variant === 'full' ? 'logo_path' : 'logo_icon_path'
+  const pathPrefix = variant === 'full' ? 'logo' : 'logo-icon'
+
+  const adminSupabase = createAdminClient()
+  const { data: existing } = await q.getAgencyBranding(supabase, agencyId)
+  const oldPath = existing?.[colKey]
+  if (oldPath) {
+    await adminSupabase.storage.from(STORAGE_BUCKET.AGENCY_PUBLIC).remove([oldPath])
+  }
+
+  const ext = file.name.split('.').pop() || 'png'
+  const path = `${agencyId}/${pathPrefix}.${ext}`
+
+  const { error: uploadError } = await adminSupabase.storage
+    .from(STORAGE_BUCKET.AGENCY_PUBLIC)
+    .upload(path, file, { upsert: true, contentType: file.type })
+  if (uploadError) return { url: null, error: uploadError.message }
+
+  await supabase.from('agencies').update({ [colKey]: path }).eq('id', agencyId)
+
+  revalidatePath('/pages/agency', 'layout')
+  revalidatePath('/pages/caregiver', 'layout')
+
+  return { url: agencyBrandingPublicUrl(path), error: null }
+}
+
+export async function resetAgencyBrandingAction(agencyId: string): Promise<{ success: boolean; error: string | null }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return { success: false, error: 'Unauthorized' }
+
+  const adminSupabase = createAdminClient()
+  const { data: existing } = await q.getAgencyBranding(supabase, agencyId)
+  const pathsToRemove = [existing?.logo_path, existing?.logo_icon_path].filter(Boolean) as string[]
+  if (pathsToRemove.length > 0) {
+    await adminSupabase.storage.from(STORAGE_BUCKET.AGENCY_PUBLIC).remove(pathsToRemove)
+  }
+
+  await q.clearAgencyBranding(supabase, agencyId)
+  revalidatePath('/pages/agency', 'layout')
+  revalidatePath('/pages/caregiver', 'layout')
+  return { success: true, error: null }
 }

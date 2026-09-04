@@ -17,8 +17,9 @@ import {
   AlertCircle,
   ExternalLink,
 } from 'lucide-react'
+import Button from '@/components/ui/PrimaryButton'
+import Tabs from '@/components/ui/Tabs'
 import { createClient } from '@/lib/supabase/client'
-import * as q from '@/lib/supabase/query'
 import { createSignedStorageUrl, STORAGE_BUCKET } from '@/lib/supabase/storage'
 import {
   updateCertificationDetails,
@@ -28,6 +29,7 @@ import {
   getAvailableProgramsForCert,
   getCertificationVersionHistory,
 } from '@/app/actions/licenses'
+import { uploadLicenseDocumentAction } from '@/app/actions/license-documents'
 import Modal from './Modal'
 import { US_STATES } from '@/lib/constants'
 import { formatDate, formatDateShort } from '@/lib/format-date'
@@ -233,11 +235,8 @@ function CertInfoSection({
         )}
         {isEditing && (
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => setIsEditing(false)} disabled={isSaving} className="px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">Cancel</button>
-            <button type="button" onClick={handleSave} disabled={isSaving} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50">
-              {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-              Save
-            </button>
+            <Button variant="secondary" size="sm" type="button" onClick={() => setIsEditing(false)} disabled={isSaving}>Cancel</Button>
+            <Button variant="primary" size="sm" type="button" onClick={handleSave} disabled={isSaving} loading={isSaving} icon={Save}>Save</Button>
           </div>
         )}
       </div>
@@ -324,23 +323,12 @@ function DocumentsSection({
     setIsUploading(true)
     setUploadError(null)
     try {
-      const supabase = createClient()
-      const fileExt = uploadFile.name.split('.').pop()
-      const filePath = `license-${license.id}/${Date.now()}.${fileExt}`
-      const { error: storageErr } = await supabase.storage
-        .from('application-documents')
-        .upload(filePath, uploadFile, { upsert: false, contentType: uploadFile.type || `application/${fileExt}` })
-      if (storageErr) throw storageErr
-      const { error: docErr } = await q.insertLicenseDocument(supabase, {
-        license_id: license.id,
-        document_name: uploadDocName.trim() || uploadFile.name,
-        document_url: filePath,
-        document_type: uploadDocType || null,
-      })
-      if (docErr) {
-        await supabase.storage.from('application-documents').remove([filePath])
-        throw docErr
-      }
+      const formData = new FormData()
+      formData.append('file', uploadFile)
+      if (uploadDocName.trim()) formData.set('document_name', uploadDocName.trim())
+      if (uploadDocType) formData.set('document_type', uploadDocType)
+      const { error } = await uploadLicenseDocumentAction(license.id, agencyId ?? null, formData)
+      if (error) throw new Error(error)
       setUploadFile(null)
       setUploadDocName('')
       setUploadDocType('')
@@ -462,15 +450,9 @@ function DocumentsSection({
                   </select>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={handleUpload}
-                disabled={isUploading}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50"
-              >
-                {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              <Button variant="primary" type="button" onClick={handleUpload} disabled={isUploading} loading={isUploading} icon={Upload}>
                 Upload
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -618,15 +600,9 @@ function ProgramsSection({
               <option value="created_from">Created from</option>
               <option value="renewal_of">Renewal of</option>
             </select>
-            <button
-              type="button"
-              onClick={handleLink}
-              disabled={!selectedAppId || isLinking}
-              className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-1.5 shrink-0"
-            >
-              {isLinking ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+            <Button variant="primary" type="button" onClick={handleLink} disabled={!selectedAppId || isLinking} loading={isLinking}>
               Link
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -734,20 +710,15 @@ export default function CertificationDetailModal({
   const [activeTab, setActiveTab] = useState<Tab>('overview')
 
   const tabPills = (
-    <div className="flex gap-1">
-      {(['overview', 'history'] as Tab[]).map(tab => (
-        <button
-          key={tab}
-          type="button"
-          onClick={() => setActiveTab(tab)}
-          className={`px-4 py-1.5 text-sm font-medium rounded-full transition-colors capitalize ${
-            activeTab === tab ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
-          }`}
-        >
-          {tab}
-        </button>
-      ))}
-    </div>
+    <Tabs
+      variant="pill"
+      active={activeTab}
+      onChange={(k) => setActiveTab(k as Tab)}
+      items={[
+        { key: 'overview', label: 'Overview' },
+        { key: 'history', label: 'History' },
+      ]}
+    />
   )
 
   return (

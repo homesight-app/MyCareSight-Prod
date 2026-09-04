@@ -1,7 +1,9 @@
 import type { Supabase } from '../types'
 
+const AGENCY_COLS = 'id, name, created_at, updated_at, business_type, tax_id, primary_license_number, website, physical_street_address, physical_city, physical_state, physical_zip_code, same_as_physical, mailing_street_address, mailing_city, mailing_state, mailing_zip_code, agency_admin_ids, dba_name, hours_of_operation, fax_number, date_of_formation, npi, onboarding_status, state_specific_data, phone_number, email, region_service_area, is_on_call, previously_licensed, prev_license_closed_date, status, legal_entity_name, entity_type, state_of_incorporation, date_of_incorporation, licensed_office_street, licensed_office_city, licensed_office_state, licensed_office_zip, licensed_same_as_physical, plan_id, primary_contact_first_name, primary_contact_last_name'
+
 export async function getAgencyById(supabase: Supabase, agencyId: string) {
-  return supabase.from('agencies').select('*').eq('id', agencyId).single()
+  return supabase.from('agencies').select(AGENCY_COLS).eq('id', agencyId).single()
 }
 
 export async function insertAgency(supabase: Supabase, payload: Record<string, unknown>) {
@@ -77,11 +79,25 @@ export async function updateClientById(supabase: Supabase, adminId: string, data
 }
 
 export async function getAgencyByAdminId(supabase: Supabase, adminId: string) {
-  return supabase.from('agencies').select('id').contains('agency_admin_ids', [adminId]).maybeSingle()
+  const { data: aa, error } = await supabase
+    .from('agency_admins')
+    .select('agency_id')
+    .eq('id', adminId)
+    .eq('status', 'active')
+    .maybeSingle()
+  if (error || !aa?.agency_id) return { data: null, error }
+  return supabase.from('agencies').select('id').eq('id', aa.agency_id).maybeSingle()
 }
 
 export async function getAgencyByAdminIdFull(supabase: Supabase, adminId: string) {
-  return supabase.from('agencies').select('*').contains('agency_admin_ids', [adminId]).maybeSingle()
+  const { data: aa, error } = await supabase
+    .from('agency_admins')
+    .select('agency_id')
+    .eq('id', adminId)
+    .eq('status', 'active')
+    .maybeSingle()
+  if (error || !aa?.agency_id) return { data: null, error }
+  return supabase.from('agencies').select(AGENCY_COLS).eq('id', aa.agency_id).maybeSingle()
 }
 
 export async function updateClientAgencyId(supabase: Supabase, adminId: string, agencyId: string) {
@@ -97,7 +113,7 @@ export async function updateClientCompanyName(supabase: Supabase, adminId: strin
 }
 
 export async function getAgenciesOrdered(supabase: Supabase) {
-  return supabase.from('agencies').select('*').order('created_at', { ascending: false })
+  return supabase.from('agencies').select(AGENCY_COLS).order('created_at', { ascending: false })
 }
 
 export interface GetAgenciesPaginatedOpts {
@@ -316,4 +332,38 @@ export async function insertAgencyDocument(
 
 export async function deleteAgencyDocument(supabase: Supabase, docId: string) {
   return supabase.from('agency_documents').delete().eq('id', docId)
+}
+
+const BRANDING_COLS = 'logo_path, logo_icon_path, primary_color, sidebar_color'
+
+export interface AgencyBrandingRow {
+  logo_path: string | null
+  logo_icon_path: string | null
+  primary_color: string | null
+  sidebar_color: string | null
+}
+
+export async function getAgencyBranding(supabase: Supabase, agencyId: string) {
+  return supabase
+    .from('agencies')
+    .select(BRANDING_COLS)
+    .eq('id', agencyId)
+    .single()
+}
+
+export async function updateAgencyBrandingColors(
+  supabase: Supabase,
+  agencyId: string,
+  payload: { primary_color: string; sidebar_color: string }
+) {
+  return supabase.from('agencies').update(payload).eq('id', agencyId)
+}
+
+export async function clearAgencyBranding(supabase: Supabase, agencyId: string) {
+  return supabase.from('agencies').update({
+    logo_path: null,
+    logo_icon_path: null,
+    primary_color: null,
+    sidebar_color: null,
+  }).eq('id', agencyId)
 }

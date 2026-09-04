@@ -22,6 +22,9 @@ import {
 import { updateKeyStaffById, addKeyStaffWithRoles } from '@/app/actions/agency-onboarding'
 import { getPeopleForAgency, type RawKeyStaff, type RawAdmin, type RawCoordinator } from '@/app/actions/agency-people'
 import { changePersonCredential } from '@/app/actions/agency-users'
+import PhoneInput from '@/components/ui/PhoneInput'
+import EmailInput from '@/components/ui/EmailInput'
+import { isValidUSPhone, isValidEmail, PHONE_ERROR, EMAIL_ERROR } from '@/lib/validation'
 
 // ——— Constants ————————————————————————————————————————————
 
@@ -106,7 +109,8 @@ function buildPeopleRows(
       credential,
       adminRecordId: admin?.id ?? null,
       coordinatorRecordId: coord?.id ?? null,
-      status: (s.status as PersonRow['status']) ?? 'active',
+      // Prefer user_profiles.is_active when a login account exists; fall back to ks status for pure contacts
+      status: (s.user_profile_id && s.is_active === false) ? 'inactive' : ((s.status as PersonRow['status']) ?? 'active'),
     }
   })
 
@@ -128,7 +132,7 @@ function buildPeopleRows(
       credential: 'company_owner',
       adminRecordId: a.id,
       coordinatorRecordId: null,
-      status: (a.status as PersonRow['status']) ?? 'active',
+      status: a.is_active === false ? 'inactive' : 'active',
     })
   }
 
@@ -149,7 +153,7 @@ function buildPeopleRows(
       credential: 'care_coordinator',
       adminRecordId: null,
       coordinatorRecordId: c.id,
-      status: (c.status as PersonRow['status']) ?? 'active',
+      status: c.is_active === false ? 'inactive' : 'active',
     })
   }
 
@@ -174,6 +178,7 @@ function GiveAccessModal({ isOpen, onClose, agencyId, person, onSuccess }: GiveA
   const [tempPassword, setTempPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [emailError, setEmailError] = useState<string | null>(null)
 
   useEffect(() => {
     if (isOpen) {
@@ -183,12 +188,17 @@ function GiveAccessModal({ isOpen, onClose, agencyId, person, onSuccess }: GiveA
       setRole('company_owner')
       setTempPassword('')
       setError(null)
+      setEmailError(null)
     }
   }, [isOpen, person])
 
   const handleSubmit = async () => {
     if (!firstName.trim() || !email.trim() || !tempPassword.trim()) {
       setError('First name, email, and temporary password are required.')
+      return
+    }
+    if (!isValidEmail(email)) {
+      setEmailError(EMAIL_ERROR)
       return
     }
     if (tempPassword.length < 8) {
@@ -219,7 +229,17 @@ function GiveAccessModal({ isOpen, onClose, agencyId, person, onSuccess }: GiveA
           <FieldInput label="First Name" value={firstName} onChange={setFirstName} required />
           <FieldInput label="Last Name" value={lastName} onChange={setLastName} />
         </div>
-        <FieldInput label="Email" type="email" value={email} onChange={setEmail} required />
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Email<span className="text-red-500 ml-0.5">*</span>
+          </label>
+          <EmailInput
+            value={email}
+            onChange={e => { setEmail(e.target.value); if (emailError) setEmailError(null) }}
+            error={emailError ?? undefined}
+            className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+          />
+        </div>
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">
             System Role<span className="text-red-500 ml-0.5">*</span>
@@ -251,7 +271,7 @@ function GiveAccessModal({ isOpen, onClose, agencyId, person, onSuccess }: GiveA
             type="button"
             onClick={handleSubmit}
             disabled={submitting}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-brand text-white text-sm font-semibold rounded-lg hover:bg-brand-hover transition-colors disabled:opacity-50"
           >
             {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
             {submitting ? 'Creating…' : 'Create Login'}
@@ -286,12 +306,15 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
   const [tempPassword, setTempPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [phoneError, setPhoneError] = useState<string | null>(null)
+  const [emailError, setEmailError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!isOpen) return
     setFirstName(''); setLastName(''); setOfficerRoles([]); setOwnershipPct('')
     setPhone(''); setEmail(''); setCreateLogin(false)
     setCredential('company_owner'); setTempPassword(''); setError(null)
+    setPhoneError(null); setEmailError(null)
   }, [isOpen])
 
   const toggleRole = (key: OfficerRoleKey) => {
@@ -304,6 +327,13 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
     if (!firstName.trim() || !lastName.trim()) { setError('First and last name are required.'); return }
     if (createLogin && !email.trim()) { setError('Email is required when creating a login.'); return }
     if (createLogin && tempPassword.length < 8) { setError('Temporary password must be at least 8 characters.'); return }
+    const newPhoneError = phone.trim() && !isValidUSPhone(phone) ? PHONE_ERROR : null
+    const newEmailError = email.trim() && !isValidEmail(email) ? EMAIL_ERROR : null
+    if (newPhoneError || newEmailError) {
+      setPhoneError(newPhoneError)
+      setEmailError(newEmailError)
+      return
+    }
     setSubmitting(true)
     setError(null)
 
@@ -361,7 +391,7 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
                   type="checkbox"
                   checked={officerRoles.includes(r.key)}
                   onChange={() => toggleRole(r.key)}
-                  className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-brand focus:ring-brand"
                 />
                 <span className="text-xs text-gray-700">{r.label}</span>
               </label>
@@ -377,8 +407,24 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
         )}
 
         <div className="grid grid-cols-2 gap-3">
-          <FieldInput label="Phone" value={phone} onChange={setPhone} placeholder="(555) 123-4567" />
-          <FieldInput label="Email" type="email" value={email} onChange={setEmail} />
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+            <PhoneInput
+              value={phone}
+              onChange={e => { setPhone(e.target.value); if (phoneError) setPhoneError(null) }}
+              error={phoneError ?? undefined}
+              className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
+            <EmailInput
+              value={email}
+              onChange={e => { setEmail(e.target.value); if (emailError) setEmailError(null) }}
+              error={emailError ?? undefined}
+              className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            />
+          </div>
         </div>
 
         <div className="border-t border-gray-100 pt-3">
@@ -387,7 +433,7 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
               type="checkbox"
               checked={createLogin}
               onChange={e => setCreateLogin(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              className="w-4 h-4 rounded border-gray-300 text-brand focus:ring-brand"
             />
             <span className="text-sm font-medium text-gray-700">Create system login for this person</span>
           </label>
@@ -426,7 +472,7 @@ function AddPersonModal({ isOpen, onClose, agencyId, onSuccess }: AddPersonModal
             type="button"
             onClick={handleSubmit}
             disabled={submitting}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-brand text-white text-sm font-semibold rounded-lg hover:bg-brand-hover transition-colors disabled:opacity-50"
           >
             {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
             {submitting ? 'Adding…' : 'Add Person'}
@@ -460,6 +506,8 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
   const [submitting, setSubmitting]     = useState(false)
   const [error, setError]               = useState<string | null>(null)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [phoneError, setPhoneError]     = useState<string | null>(null)
+  const [emailError, setEmailError]     = useState<string | null>(null)
 
   useEffect(() => {
     if (isOpen) {
@@ -470,6 +518,8 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
       setOfficerRoles(person.officerRoles)
       setCredential(person.credential ?? '')
       setError(null)
+      setPhoneError(null)
+      setEmailError(null)
     }
   }, [isOpen, person])
 
@@ -481,6 +531,13 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
 
   const handleSubmit = async () => {
     if (!firstName.trim() || !lastName.trim()) { setError('First and last name are required.'); return }
+    const newPhoneError = phone.trim() && !isValidUSPhone(phone) ? PHONE_ERROR : null
+    const newEmailError = email.trim() && !isValidEmail(email) ? EMAIL_ERROR : null
+    if (newPhoneError || newEmailError) {
+      setPhoneError(newPhoneError)
+      setEmailError(newEmailError)
+      return
+    }
     setSubmitting(true)
     setError(null)
     const fullName = `${firstName.trim()} ${lastName.trim()}`
@@ -547,8 +604,24 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
             <FieldInput label="Last Name" value={lastName} onChange={setLastName} required />
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <FieldInput label="Phone" value={phone} onChange={setPhone} placeholder="(555) 123-4567" />
-            <FieldInput label="Email" type="email" value={email} onChange={setEmail} />
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+              <PhoneInput
+                value={phone}
+                onChange={e => { setPhone(e.target.value); if (phoneError) setPhoneError(null) }}
+                error={phoneError ?? undefined}
+                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
+              <EmailInput
+                value={email}
+                onChange={e => { setEmail(e.target.value); if (emailError) setEmailError(null) }}
+                error={emailError ?? undefined}
+                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+            </div>
           </div>
 
           <div>
@@ -560,7 +633,7 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
                     type="checkbox"
                     checked={officerRoles.includes(r.key)}
                     onChange={() => toggleRole(r.key)}
-                    className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    className="w-3.5 h-3.5 rounded border-gray-300 text-brand focus:ring-brand"
                   />
                   <span className="text-xs text-gray-700">{r.label}</span>
                 </label>
@@ -621,7 +694,7 @@ function EditPersonModal({ isOpen, onClose, agencyId, person, onSuccess }: EditP
               type="button"
               onClick={handleSubmit}
               disabled={submitting}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-brand text-white text-sm font-semibold rounded-lg hover:bg-brand-hover transition-colors disabled:opacity-50"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
               {submitting ? 'Saving…' : 'Save Changes'}
@@ -836,7 +909,7 @@ export default function AgencyPeopleTab({ agencyId }: { agencyId: string }) {
           <button
             type="button"
             onClick={() => setAddOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-brand text-white text-sm font-semibold rounded-lg hover:bg-brand-hover transition-colors"
           >
             <UserPlus className="w-4 h-4" />
             Add Person

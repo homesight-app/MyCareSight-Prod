@@ -4,30 +4,14 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import * as z from 'zod'
-import { US_PHONE_REGEX, PHONE_ERROR } from '@/lib/validation'
+import { expertSchema, type ExpertFormData } from '@/lib/schemas/expert'
 import PhoneInput from '@/components/ui/PhoneInput'
 import { createExpert, CreateExpertData } from '@/app/actions/experts'
 import Modal from './Modal'
 import { Loader2 } from 'lucide-react'
+import Button from '@/components/ui/PrimaryButton'
 import { showValidationToast, showSuccessToast } from '@/lib/form-validation-toast'
 
-const expertSchema = z.object({
-  firstName: z.string().min(1, 'First name is required').min(2, 'First name must be at least 2 characters'),
-  lastName: z.string().min(1, 'Last name is required').min(2, 'Last name must be at least 2 characters'),
-  email: z.string().email('Please enter a valid email address'),
-  phone: z.string().optional().refine(val => !val || US_PHONE_REGEX.test(val.trim()), PHONE_ERROR),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  confirmPassword: z.string().min(8, 'Please confirm your password'),
-  expertise: z.string().optional(),
-  role: z.string().optional(),
-  status: z.enum(['active', 'inactive']),
-}).refine((data) => data.password === data.confirmPassword, {
-  message: "Passwords don't match",
-  path: ['confirmPassword'],
-})
-
-type ExpertFormData = z.infer<typeof expertSchema>
 
 interface AddExpertModalProps {
   isOpen: boolean
@@ -283,28 +267,12 @@ export default function AddExpertModal({
 
         {/* Submit Buttons */}
         <div className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-gray-200">
-          <button
-            type="button"
-            onClick={handleClose}
-            disabled={isLoading}
-            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <Button variant="secondary" type="button" onClick={handleClose} disabled={isLoading}>
             Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Creating Expert...
-              </>
-            ) : (
-              'Create Expert'
-            )}
-          </button>
+          </Button>
+          <Button variant="primary" type="submit" disabled={isLoading} loading={isLoading}>
+            Create Expert
+          </Button>
         </div>
       </form>
     </Modal>

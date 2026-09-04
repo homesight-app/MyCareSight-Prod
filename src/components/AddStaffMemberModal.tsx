@@ -4,29 +4,16 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import * as z from 'zod'
-import { US_PHONE_REGEX, PHONE_ERROR } from '@/lib/validation'
+import { staffMemberSchema, type StaffMemberFormData } from '@/lib/schemas/staff-member'
 import PhoneInput from '@/components/ui/PhoneInput'
 import { createClient } from '@/lib/supabase/client'
 import * as q from '@/lib/supabase/query'
 import { createStaffUserAccount } from '@/app/actions/users'
 import Modal from './Modal'
 import { Loader2 } from 'lucide-react'
+import Button from '@/components/ui/PrimaryButton'
 import { showValidationToast, showSuccessToast } from '@/lib/form-validation-toast'
 
-const staffMemberSchema = z.object({
-  first_name: z.string().min(1, 'First name is required').min(2, 'First name must be at least 2 characters'),
-  last_name: z.string().min(1, 'Last name is required').min(2, 'Last name must be at least 2 characters'),
-  email: z.string().email('Please enter a valid email address'),
-  phone: z.string().optional().refine(val => !val || US_PHONE_REGEX.test(val.trim()), PHONE_ERROR),
-  role: z.string().min(1, 'Role is required'),
-  job_title: z.string().optional(),
-  status: z.enum(['active', 'inactive', 'pending']),
-  employee_id: z.string().optional(),
-  start_date: z.string().optional(),
-})
-
-type StaffMemberFormData = z.infer<typeof staffMemberSchema>
 
 
 interface AddStaffMemberModalProps {
@@ -319,28 +306,12 @@ export default function AddStaffMemberModal({ isOpen, onClose, onSuccess, staffR
 
         {/* Form Actions */}
         <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-200">
-          <button
-            type="button"
-            onClick={handleClose}
-            disabled={isLoading}
-            className="px-6 py-2.5 text-gray-700 font-medium rounded-xl hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
+          <Button variant="secondary" type="button" onClick={handleClose} disabled={isLoading}>
             Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="px-6 py-2.5 bg-black text-white font-semibold rounded-xl hover:bg-gray-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {isLoading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Adding...
-              </>
-            ) : (
-              'Add Caregiver'
-            )}
-          </button>
+          </Button>
+          <Button variant="primary" type="submit" disabled={isLoading} loading={isLoading}>
+            Add Caregiver
+          </Button>
         </div>
       </form>
     </Modal>
