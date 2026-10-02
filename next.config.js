@@ -10,6 +10,10 @@ const nextConfig = {
     staleTimes: {
       dynamic: 0,
     },
+
+    serverActions: {
+      bodySizeLimit: '10mb',
+    },
   },
 
   reactStrictMode: true,
